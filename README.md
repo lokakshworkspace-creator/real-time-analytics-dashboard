@@ -59,9 +59,9 @@ docker compose up -d
 
 This starts MongoDB on `localhost:27017` with a persisted volume, database name `analytics`.
 
-Copy `.env.example` to `.env` and adjust values as needed. The backend's defaults already match this compose file, so `.env` is optional for local dev — only needed to override something (e.g. an Atlas URI).
+Copy `.env.example` to `.env` and adjust values as needed. The backend's defaults already match this compose file, so `.env` is optional for local dev — only needed to override something (e.g. an Atlas URI). `.env` is git-ignored (see `.gitignore`); each clone needs its own copy.
 
-> **Port conflict note:** if you already have MongoDB installed natively on this machine (e.g. running as a Windows service on `27017`), it will silently win over the Docker container for any connection to `localhost:27017` / `127.0.0.1:27017`, since the native install binds that address specifically while Docker's proxy binds the wildcard address. `docker compose ps` looking healthy does **not** mean the app is actually talking to it. Either stop the native MongoDB service while working on this project, or remap the container's port in `docker-compose.yml` (e.g. `"27018:27017"`) and point `MONGODB_URI` at the new port.
+> **Before you start the container:** if you have MongoDB installed natively on this machine, read [Known issues / gotchas](#known-issues--gotchas) below — it can silently shadow the Docker container on the same port.
 
 ### Backend (FastAPI)
 
@@ -131,6 +131,16 @@ Not implemented yet — see Phase plan below.
 9. ⬜ Deployment (Docker for both services, Atlas + free API host + static frontend hosting)
 10. ⬜ Final README (architecture diagram, setup instructions, what I built vs what I'd add next)
 
+## Known issues / gotchas
+
+**Native MongoDB service silently shadowing the Docker container (Windows).** If MongoDB is already installed as a Windows service on this machine, it binds `127.0.0.1:27017` specifically. Docker's port-forwarding proxy for `analytics-mongodb` binds the wildcard address (`0.0.0.0:27017`). Windows prefers the more specific binding for a loopback connection, so `mongodb://localhost:27017` — the URI the backend uses by default — resolves to the **native** service, not the container, even while `docker compose ps` reports the container healthy and running. There's no error; the app just quietly reads and writes the wrong database.
+
+How this was caught: after Phase 2's manual testing, `POST /api/metrics` and `GET /health` both succeeded, but `docker exec analytics-mongodb mongosh analytics --eval "db.metrics.countDocuments({})"` showed `0` documents. Checking `netstat -ano` for port `27017` showed two listeners — the Docker proxy and a `mongod.exe` Windows service — and the inserted documents turned up in the native instance instead.
+
+Fix used here: **stop the native MongoDB Windows service** while working on this project (`sc query MongoDB` / stop it from Services), so only the Docker container owns port `27017`. The alternative, if you need the native service running for something else, is to remap the container's port in `docker-compose.yml` (e.g. `"27018:27017"`) and point `MONGODB_URI` in `.env` at `mongodb://localhost:27018` instead.
+
+To verify which Mongo you're actually talking to at any point: `docker exec analytics-mongodb mongosh analytics --quiet --eval "db.metrics.countDocuments({})"` right after a test POST — if the count doesn't match what you just inserted, requests are going somewhere else.
+
 ## Design decisions
 
 Documented here as each phase introduces a real trade-off (not before — no decisions without code behind them yet).
@@ -140,6 +150,7 @@ Documented here as each phase introduces a real trade-off (not before — no dec
 - MongoDB's `_id` (BSON `ObjectId`) is converted to a plain string at one boundary function (`metric_document_to_out`) rather than writing a custom Pydantic `ObjectId` type — simpler to read and explain, and it's the only place in the codebase that needs to know Mongo's id representation.
 - Motor connect/close is wired into FastAPI's `lifespan` context (not opened lazily per-request), so a bad `MONGODB_URI` fails fast at startup instead of on the first request.
 - `anomaly` is hard-coded `false` at write time for now, not left unset — keeps `MetricOut`'s shape stable across phases so the frontend contract set up in Phase 6 won't need to change when Phase 5 wires in real detection.
+- `MetricOut.timestamp` has an explicit `field_serializer` forcing UTC ISO-8601 with a `Z` suffix on every response, regardless of whether the underlying datetime is naive or tz-aware. This matters because Motor/PyMongo hand back **naive** datetimes on read (BSON dates carry no tzinfo), which Pydantic would otherwise serialize without any offset — ambiguous to API consumers about what timezone it's in. Naive values are treated as UTC (the only thing they can be, given the write path); aware values are converted to UTC. Output always matches the `...Z` format used in the data model example above.
 
 ## What I built vs what I'd add next
 

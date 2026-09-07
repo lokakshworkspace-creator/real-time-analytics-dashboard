@@ -8,10 +8,10 @@ can evolve independently, e.g. Phase 5 will change how `anomaly` gets
 set without touching what clients are allowed to POST.
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_serializer
 
 # The five metrics this MVP simulates and displays (see CLAUDE.md). A
 # Literal instead of a bare str catches typos/garbage metric names at
@@ -52,6 +52,24 @@ class MetricOut(BaseModel):
         default=False,
         description="Always False for now — z-score detection is wired in during Phase 5.",
     )
+
+    @field_serializer("timestamp")
+    def serialize_timestamp(self, dt: datetime) -> str:
+        """Always emit UTC ISO-8601 with an explicit 'Z', matching the
+        data model in CLAUDE.md (e.g. "2026-08-30T10:31:06Z").
+
+        Motor/PyMongo store BSON dates as UTC but hand them back as
+        *naive* datetimes (no tzinfo) — Pydantic's default datetime
+        serialization would then omit any offset, which is ambiguous
+        for API consumers. We treat a naive datetime as UTC (the only
+        thing it can be, given where it came from) and convert an
+        aware one to UTC, so the output format is identical either way.
+        """
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        else:
+            dt = dt.astimezone(timezone.utc)
+        return dt.isoformat().replace("+00:00", "Z")
 
 
 def metric_document_to_out(document: dict) -> MetricOut:
