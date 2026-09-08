@@ -19,3 +19,6 @@ frontend/.vite/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Claude Code local tooling state (not project content)
+.claude/
