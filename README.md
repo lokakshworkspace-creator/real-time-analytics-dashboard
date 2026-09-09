@@ -1,6 +1,6 @@
 # Real-Time Data Analytics Dashboard
 
-> Status: Phase 3 (simulator) complete. Backend ingests and stores; a synthetic producer streams realistic + spiky events into it. No anomaly detection yet, no frontend.
+> Status: Phase 4 (analytics endpoints) complete. Backend ingests, stores, indexes, and now serves read-side aggregates (`/metrics/latest`, `/metrics/stats`). No anomaly detection yet, no frontend.
 
 A full-stack real-time analytics platform that ingests streaming metric events, stores them in MongoDB via a FastAPI backend, runs statistical anomaly detection, and visualizes trends and alerts in a React dashboard.
 
@@ -37,10 +37,11 @@ Simulator/Producer ──POST /api/metrics──▶ FastAPI ──▶ MongoDB
   app/
     main.py       FastAPI app, CORS, lifespan (Mongo connect/close), GET /health
     config.py     Settings (reads .env at repo root, sane localhost defaults)
-    database.py   Motor client lifecycle + get_database() dependency
-    models.py     MetricIn / MetricOut (Pydantic v2) + ObjectId→str conversion
+    database.py   Motor client lifecycle + get_database() dependency + ensure_indexes()
+    models.py     MetricIn/MetricOut/LatestMetric/MetricStats (Pydantic v2) + ObjectId→str conversion
     routers/
-      metrics.py  POST /api/metrics (validate + store only — no detection yet)
+      metrics.py    POST /api/metrics (validate + store only — no detection yet)
+      analytics.py  GET /metrics/latest, GET /metrics/stats (aggregation pipeline)
   simulator.py  Standalone synthetic event producer, POSTs to the API over HTTP
   requirements.txt
 /frontend   React (Vite) dashboard (not yet implemented)
@@ -129,23 +130,37 @@ Each event is one of the 5 metrics for a random source (`server-1`/`server-2`/`s
 
 Simulated metrics: `orders`, `response_time`, `cpu_usage`, `failed_requests`, `memory_usage`.
 
-## API (planned)
+## API
 
-| Method | Path | Purpose |
-|---|---|---|
-| POST | `/api/metrics` | Ingest one event, validate, run detection, store |
-| GET | `/metrics/latest?limit=50` | Most recent value per metric |
-| GET | `/metrics/stats?metric=X&minutes=60` | Aggregates via MongoDB aggregation pipeline |
-| GET | `/metrics/anomalies?limit=50` | Flagged events |
+| Method | Path | Purpose | Status |
+|---|---|---|---|
+| POST | `/api/metrics` | Ingest one event, validate, store | ✅ (detection still a no-op — Phase 5) |
+| GET | `/metrics/latest?source=` | Most recent document per metric (optionally filtered by source) | ✅ |
+| GET | `/metrics/stats?metric=X&minutes=60` | count/avg/min/max for one metric over a trailing window, via aggregation pipeline | ✅ |
+| GET | `/metrics/anomalies?limit=50` | Flagged events | ⬜ Phase 5 — no anomaly data exists yet, so there's nothing to build here until then |
 
-Not implemented yet — see Phase plan below.
+Note the deliberate path inconsistency: ingestion is `/api/metrics`, the three read endpoints are bare `/metrics/...`. That's what CLAUDE.md's own endpoint list specifies, not an oversight — kept as-is rather than "fixed".
+
+**`GET /metrics/latest` example:**
+```bash
+curl http://localhost:8000/metrics/latest
+curl "http://localhost:8000/metrics/latest?source=server-2"
+```
+Returns a JSON array with **up to 5 entries** — one per metric that has ever received an event, each the single most-recent document for that metric (optionally scoped to one source). A metric with zero events is omitted, not padded with a placeholder.
+
+**`GET /metrics/stats` example:**
+```bash
+curl "http://localhost:8000/metrics/stats?metric=cpu_usage&minutes=60"
+# {"metric":"cpu_usage","minutes":60,"count":24,"avg":56.4,"min":40.0,"max":98.5}
+```
+`minutes` defaults to 60 if omitted. Returns **404** if there's no data for that metric in the window (not a 200 with zeroed-out numbers — see Design decisions).
 
 ## Phase plan
 
 1. ✅ Scaffold (repo structure, README skeleton, `.env.example`, Docker Compose for local MongoDB)
 2. ✅ Backend foundation (FastAPI app, Motor connection, Pydantic models, `POST /api/metrics`, CORS)
 3. ✅ Simulator (posts realistic events on an interval, with deliberate spikes)
-4. ⬜ Analytics endpoints (`/metrics/latest`, `/metrics/stats`, indexes)
+4. ✅ Analytics endpoints (`/metrics/latest`, `/metrics/stats`, indexes)
 5. ⬜ Anomaly detection (z-score on ingest, `/metrics/anomalies`); 5b: Isolation Forest (stretch)
 6. ⬜ React dashboard (metric cards, trend chart, anomaly panel, loading/error states)
 7. ⬜ Polling layer (`useEffect` + `setInterval`, cleanup on unmount)
@@ -180,6 +195,12 @@ Documented here as each phase introduces a real trade-off (not before — no dec
 - Spike cadence is a deterministic counter (re-randomized between 30–50 events after each spike fires), not a flat per-event probability. A probability can go quiet for a long, unlucky stretch; the counter guarantees a spike shows up within a bounded window, which matters for both live demos and for giving Phase 5's detector something to find in any reasonably short run.
 - `orders` spikes *downward* (toward zero), while every other metric spikes *upward*. An unusually busy period isn't the anomaly that matters for an orders metric — a sudden collapse toward zero (outage, broken checkout) is. Spiking it upward like the others would be modeling the wrong failure mode for that metric.
 - Normal-range values are drawn from a Gaussian (mean/stdev per metric) and clipped to that metric's stated range, rather than uniform noise — the ask was for values that fluctuate with a believable shape, and a hard clip keeps "normal" and "spike" unambiguous from each other in the data itself.
+
+**Phase 4:**
+- `GET /metrics/latest` runs 5 independent `find_one()` queries (one per known metric, concurrently via `asyncio.gather`), instead of one `$group` aggregation over the whole collection. Each query is an equality match on `metric` sorted by `timestamp` descending — exactly what the `metric_1_timestamp_-1` index is for, confirmed via `.explain()` (`IXSCAN`, `docsExamined == nReturned == 1`). A single cross-collection `$group` would only be able to lean on the flatter `timestamp_-1` index and touch more documents to do the same job.
+- Indexes are created with **explicit names** (`metric_1_timestamp_-1`, `timestamp_-1`) rather than left to PyMongo's auto-naming, and wrapped in a per-index try/except around `create_index()`. Repeated calls with an unchanged key spec are already no-ops in MongoDB; the explicit name + try/except only matters for the case where a name later points at a different key spec (e.g. this list changes in some future phase) — that raises `OperationFailure`, and one bad index definition shouldn't take the whole API down at startup.
+- `GET /metrics/stats` returns **404**, not a 200 with `count: 0, avg: null, ...`, when the window has no data. A "no answer" and "the answer is zero" are different things, and a null-filled 200 is easy to mistake for a real (if boring) result.
+- `LatestMetric` and `MetricStats` are new, separate Pydantic models rather than reusing `MetricOut` for `/metrics/latest` — even though today the fields largely overlap, each endpoint's contract is conceptually distinct (a live snapshot vs. "the document just written"), and giving each its own type keeps the OpenAPI docs and any future frontend types honest about which endpoint produced them. The UTC-`Z` timestamp formatting logic itself is still shared (one `_format_utc_z()` helper), so the duplication is only the model shape, not the serialization behavior.
 
 ## What I built vs what I'd add next
 

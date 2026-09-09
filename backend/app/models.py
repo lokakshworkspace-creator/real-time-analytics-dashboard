@@ -9,7 +9,7 @@ set without touching what clients are allowed to POST.
 """
 
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Literal, get_args
 
 from pydantic import BaseModel, Field, field_serializer
 
@@ -27,6 +27,12 @@ MetricName = Literal[
     "memory_usage",
 ]
 
+# Single source of truth for "all 5 metric names" as a plain iterable —
+# used by GET /metrics/latest (Phase 4) to know what to look up without
+# duplicating this list a second time and risking it drifting out of
+# sync with the Literal above.
+METRIC_NAMES: tuple[str, ...] = get_args(MetricName)
+
 
 class MetricIn(BaseModel):
     """Request body for POST /api/metrics."""
@@ -40,8 +46,27 @@ class MetricIn(BaseModel):
     )
 
 
+def _format_utc_z(dt: datetime) -> str:
+    """Always renders UTC ISO-8601 with an explicit 'Z', matching the
+    data model in CLAUDE.md (e.g. "2026-08-30T10:31:06Z").
+
+    Motor/PyMongo store BSON dates as UTC but hand them back as *naive*
+    datetimes (no tzinfo) — Pydantic's default datetime serialization
+    would then omit any offset, which is ambiguous for API consumers.
+    We treat a naive datetime as UTC (the only thing it can be, given
+    where it came from) and convert an aware one to UTC, so the output
+    format is identical either way. Shared by every response model
+    below instead of repeating this logic per model.
+    """
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    return dt.isoformat().replace("+00:00", "Z")
+
+
 class MetricOut(BaseModel):
-    """Response body for a stored metric document."""
+    """Response body for a stored metric document (POST /api/metrics)."""
 
     id: str
     timestamp: datetime
@@ -55,21 +80,7 @@ class MetricOut(BaseModel):
 
     @field_serializer("timestamp")
     def serialize_timestamp(self, dt: datetime) -> str:
-        """Always emit UTC ISO-8601 with an explicit 'Z', matching the
-        data model in CLAUDE.md (e.g. "2026-08-30T10:31:06Z").
-
-        Motor/PyMongo store BSON dates as UTC but hand them back as
-        *naive* datetimes (no tzinfo) — Pydantic's default datetime
-        serialization would then omit any offset, which is ambiguous
-        for API consumers. We treat a naive datetime as UTC (the only
-        thing it can be, given where it came from) and convert an
-        aware one to UTC, so the output format is identical either way.
-        """
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        else:
-            dt = dt.astimezone(timezone.utc)
-        return dt.isoformat().replace("+00:00", "Z")
+        return _format_utc_z(dt)
 
 
 def metric_document_to_out(document: dict) -> MetricOut:
@@ -90,3 +101,50 @@ def metric_document_to_out(document: dict) -> MetricOut:
         source=document["source"],
         anomaly=document.get("anomaly", False),
     )
+
+
+class LatestMetric(BaseModel):
+    """One entry in the response of GET /metrics/latest.
+
+    Structurally similar to MetricOut, but kept as its own model rather
+    than reused: this endpoint's contract (one snapshot per metric,
+    always the newest) is conceptually different from "the document
+    POST /api/metrics just created", and giving it its own name keeps
+    the OpenAPI docs and any future frontend types honest about which
+    endpoint they came from, even though today the fields match.
+    """
+
+    id: str
+    metric: str
+    value: float
+    source: str
+    timestamp: datetime
+    anomaly: bool
+
+    @field_serializer("timestamp")
+    def serialize_timestamp(self, dt: datetime) -> str:
+        return _format_utc_z(dt)
+
+
+def metric_document_to_latest(document: dict) -> LatestMetric:
+    return LatestMetric(
+        id=str(document["_id"]),
+        metric=document["metric"],
+        value=document["value"],
+        source=document["source"],
+        timestamp=document["timestamp"],
+        anomaly=document.get("anomaly", False),
+    )
+
+
+class MetricStats(BaseModel):
+    """Response body for GET /metrics/stats — aggregate numbers only,
+    computed in MongoDB (see routers/analytics.py), never raw documents.
+    """
+
+    metric: str
+    minutes: int = Field(..., description="Size of the trailing window these stats cover.")
+    count: int
+    avg: float
+    min: float
+    max: float

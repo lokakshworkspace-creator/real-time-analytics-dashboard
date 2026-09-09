@@ -10,13 +10,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from .config import settings
-from .database import close_mongo_connection, connect_to_mongo, get_database
-from .routers import metrics
+from .database import close_mongo_connection, connect_to_mongo, ensure_indexes, get_database
+from .routers import analytics, metrics
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await connect_to_mongo()
+    await ensure_indexes(get_database())
     yield
     await close_mongo_connection()
 
@@ -36,6 +37,7 @@ app.add_middleware(
 )
 
 app.include_router(metrics.router)
+app.include_router(analytics.router)
 
 
 @app.get("/health", tags=["health"], response_model=None)
