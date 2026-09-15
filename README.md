@@ -1,6 +1,6 @@
 # Real-Time Data Analytics Dashboard
 
-> Status: Phase 7 (real-time polling) complete. The whole dashboard refreshes every 5s without ever blanking existing data, degrades gracefully on backend outages, and recovers automatically once the backend returns.
+> Status: Phase 8 (polish) complete. Every route lives under one consistent `/api/` prefix, 32 automated tests cover the detector and the API, two real bugs found during hardening are fixed, and the write-hot z-score lookup has its own index.
 
 A full-stack real-time analytics platform that ingests streaming metric events, stores them in MongoDB via a FastAPI backend, runs statistical anomaly detection, and visualizes trends and alerts in a React dashboard.
 
@@ -40,23 +40,28 @@ Simulator/Producer ──POST /api/metrics──▶ FastAPI ──▶ MongoDB
     database.py   Motor client lifecycle + get_database() dependency + ensure_indexes()
     models.py     MetricIn/MetricOut/LatestMetric/MetricStats/AnomalyEvent (Pydantic v2) + ObjectId→str conversion
     detectors/
-      zscore.py             MVP detector — runs live on every POST /api/metrics
+      zscore.py             MVP detector — compute_zscore() (pure) + score() (Mongo I/O wrapper)
       isolation_forest.py   Phase 5b stretch — offline only, invoked via `python -m`
     routers/
       metrics.py    POST /api/metrics (validate, run z-score detection, store)
-      analytics.py  GET /metrics/latest, /metrics/stats, /metrics/anomalies, /metrics/history
+      analytics.py  GET /api/metrics/{latest,stats,anomalies,history}
+  tests/
+    conftest.py          test-database fixtures (never the real `analytics` DB)
+    test_zscore.py        unit tests — compute_zscore(), deterministic input -> known output
+    test_metrics_api.py   integration tests — TestClient against a test DB
+  pytest.ini
   simulator.py  Standalone synthetic event producer, POSTs to the API over HTTP
   requirements.txt
 /frontend
   src/
     App.jsx                    Layout: header, metric cards row, chart + anomaly panel below
-    api/client.js               fetch() wrapper, one function per GET endpoint
+    api/client.js               fetch() wrapper, /api prefix applied once, one function per GET endpoint
     constants.js                 POLL_INTERVAL_MS = 5000 (one named constant, used by all 3 pollers)
     hooks/useApiData.js         Fetch-on-mount + optional polling -> {data, loading, error, isRefreshing, pollError, lastUpdated}
     components/
-      MetricCardsRow.jsx / MetricCard.jsx   GET /metrics/latest, one card per metric
-      TrendChart.jsx                        GET /metrics/history, Recharts line chart
-      AnomalyPanel.jsx                      GET /metrics/anomalies
+      MetricCardsRow.jsx / MetricCard.jsx   GET /api/metrics/latest, one card per metric
+      TrendChart.jsx                        GET /api/metrics/history, Recharts line chart
+      AnomalyPanel.jsx                      GET /api/metrics/anomalies
       LoadingState.jsx / ErrorState.jsx     Shared blocking loading/error presentation
       RefreshIndicator.jsx                  Shared non-blocking "refreshing" / "trouble refreshing" indicator
     utils/formatters.js         Relative time, metric display units — presentational only
@@ -110,6 +115,16 @@ curl -X POST http://localhost:8000/api/metrics \
 
 Or use `/docs` and try `POST /api/metrics` from the browser — it has a built-in "Try it out" form.
 
+### Tests
+
+```bash
+cd backend
+.venv\Scripts\activate          # if not already active
+pytest -v
+```
+
+32 tests: `tests/test_zscore.py` unit-tests `compute_zscore()` directly (no MongoDB — deterministic input to known output: normal values, extreme values past the minimum window, the cold-start guard, the divide-by-zero guard, and one test that independently recomputes the exact expected z-score value). `tests/test_metrics_api.py` runs FastAPI's `TestClient` against every endpoint, wired via `dependency_overrides` to a dedicated `analytics_test` database (see `tests/conftest.py`) — **MongoDB must be reachable** (`docker compose up -d`), but the real `analytics` database is never touched; the test database is dropped after every test.
+
 ### Simulator (synthetic data)
 
 ```bash
@@ -139,7 +154,7 @@ npm install
 npm run dev
 ```
 
-Opens at `http://localhost:5173` (Vite's default — confirmed empirically, not assumed, during Phase 6 verification; `FRONTEND_ORIGIN` in `.env` must match whatever port Vite actually prints). Reads `VITE_API_BASE_URL` from the **repo-root** `.env` (`vite.config.js` sets `envDir` up one level — see Design decisions), so no separate `frontend/.env` is needed.
+Opens at `http://localhost:5173` (Vite's default — confirmed empirically, not assumed, during Phase 6 verification; `FRONTEND_ORIGIN` in `.env` must match whatever port Vite actually prints). Reads `VITE_API_BASE_URL` from the **repo-root** `.env` (`vite.config.js` sets `envDir` up one level — see Design decisions), so no separate `frontend/.env` is needed. Stop it with Ctrl+C as usual; if you're scripting/automating starting and stopping it instead of running it interactively, see [Known issues / gotchas](#known-issues--gotchas) — `npm run dev` can leave an orphaned process behind on Windows when stopped non-interactively.
 
 With the backend (and ideally the simulator, for real data) running, the dashboard fetches on page load and then **every 5 seconds** — metric cards, the CPU usage trend chart, and the anomaly panel each poll independently. The first load of each shows a full loading spinner / red error box as before; every refresh after that leaves existing data on screen untouched and shows only a small "Refreshing…" pulse in that section's header while the new data is in flight. If a poll fails (e.g. the backend restarts mid-session), the last-known-good data stays exactly as it was and a small "⚠ Trouble refreshing — showing data from Ns ago" note appears instead of an error screen; the next successful poll clears it automatically, with no page reload needed.
 
@@ -159,43 +174,43 @@ Simulated metrics: `orders`, `response_time`, `cpu_usage`, `failed_requests`, `m
 
 ## API
 
+Every route lives under `/api/` (Phase 8 — see Design decisions; before this phase only `POST /api/metrics` did, the four `GET` endpoints didn't).
+
 | Method | Path | Purpose | Status |
 |---|---|---|---|
 | POST | `/api/metrics` | Ingest one event, validate, run z-score detection, store | ✅ |
-| GET | `/metrics/latest?source=` | Most recent document per metric (optionally filtered by source) | ✅ |
-| GET | `/metrics/stats?metric=X&minutes=60` | count/avg/min/max for one metric over a trailing window, via aggregation pipeline | ✅ |
-| GET | `/metrics/anomalies?limit=50&metric=X` | Flagged events, newest first | ✅ |
-| GET | `/metrics/history?metric=X&minutes=60` | Raw (timestamp, value) points, oldest first — powers the Phase 6 trend chart | ✅ (added in Phase 6, not in CLAUDE.md's original list — see Design decisions) |
+| GET | `/api/metrics/latest?source=` | Most recent document per metric (optionally filtered by source) | ✅ |
+| GET | `/api/metrics/stats?metric=X&minutes=60` | count/avg/min/max for one metric over a trailing window, via aggregation pipeline | ✅ |
+| GET | `/api/metrics/anomalies?limit=50&metric=X` | Flagged events, newest first | ✅ |
+| GET | `/api/metrics/history?metric=X&minutes=60` | Raw (timestamp, value) points, oldest first — powers the trend chart | ✅ (added in Phase 6, not in CLAUDE.md's original list — see Phase 6 Design decisions) |
 
-Note the deliberate path inconsistency: ingestion is `/api/metrics`, the three read endpoints are bare `/metrics/...`. That's what CLAUDE.md's own endpoint list specifies, not an oversight — kept as-is rather than "fixed".
-
-**`GET /metrics/latest` example:**
+**`GET /api/metrics/latest` example:**
 ```bash
-curl http://localhost:8000/metrics/latest
-curl "http://localhost:8000/metrics/latest?source=server-2"
+curl http://localhost:8000/api/metrics/latest
+curl "http://localhost:8000/api/metrics/latest?source=server-2"
 ```
 Returns a JSON array with **up to 5 entries** — one per metric that has ever received an event, each the single most-recent document for that metric (optionally scoped to one source). A metric with zero events is omitted, not padded with a placeholder.
 
-**`GET /metrics/stats` example:**
+**`GET /api/metrics/stats` example:**
 ```bash
-curl "http://localhost:8000/metrics/stats?metric=cpu_usage&minutes=60"
+curl "http://localhost:8000/api/metrics/stats?metric=cpu_usage&minutes=60"
 # {"metric":"cpu_usage","minutes":60,"count":24,"avg":56.4,"min":40.0,"max":98.5}
 ```
-`minutes` defaults to 60 if omitted. Returns **404** if there's no data for that metric in the window (not a 200 with zeroed-out numbers — see Design decisions).
+`minutes` defaults to 60 if omitted, capped at ~1 year (Phase 8 — see Design decisions). Returns **404** if there's no data for that metric in the window (not a 200 with zeroed-out numbers).
 
-**`GET /metrics/anomalies` example:**
+**`GET /api/metrics/anomalies` example:**
 ```bash
-curl http://localhost:8000/metrics/anomalies
-curl "http://localhost:8000/metrics/anomalies?metric=cpu_usage&limit=10"
+curl http://localhost:8000/api/metrics/anomalies
+curl "http://localhost:8000/api/metrics/anomalies?metric=cpu_usage&limit=10"
 # [{"id":"...","metric":"cpu_usage","value":94.6,"source":"server-1","timestamp":"...Z","anomaly":true,"z_score":4.83}, ...]
 ```
 
-**`GET /metrics/history` example:**
+**`GET /api/metrics/history` example:**
 ```bash
-curl "http://localhost:8000/metrics/history?metric=cpu_usage&minutes=60"
+curl "http://localhost:8000/api/metrics/history?metric=cpu_usage&minutes=60"
 # [{"timestamp":"...Z","value":56.4}, {"timestamp":"...Z","value":58.1}, ...]  (oldest first)
 ```
-Returns `[]` (200), not 404, when the window has no points — see Design decisions for why that's a deliberate difference from `/metrics/stats`.
+Returns `[]` (200), not 404, when the window has no points — an empty chart isn't a missing answer the way "stats of nothing" would be.
 
 ## Anomaly detection
 
@@ -219,7 +234,7 @@ For each metric+source group with enough samples, it fits a fresh `IsolationFore
 5. ✅ Anomaly detection (z-score on ingest, `/metrics/anomalies`); 5b: Isolation Forest (stretch) — ✅ both built
 6. ✅ React dashboard (metric cards, trend chart, anomaly panel, loading/error states)
 7. ✅ Polling layer (`useEffect` + `setInterval`, cleanup on unmount)
-8. ⬜ Polish (error handling, ObjectId serialization, unit tests for z-score)
+8. ✅ Polish (`/api` prefix everywhere, 32 automated tests, error handling hardening, source-aware index)
 9. ⬜ Deployment (Docker for both services, Atlas + free API host + static frontend hosting)
 10. ⬜ Final README (architecture diagram, setup instructions, what I built vs what I'd add next)
 
@@ -232,6 +247,26 @@ How this was caught: after Phase 2's manual testing, `POST /api/metrics` and `GE
 Fix used here: **stop the native MongoDB Windows service** while working on this project (`sc query MongoDB` / stop it from Services), so only the Docker container owns port `27017`. The alternative, if you need the native service running for something else, is to remap the container's port in `docker-compose.yml` (e.g. `"27018:27017"`) and point `MONGODB_URI` in `.env` at `mongodb://localhost:27018` instead.
 
 To verify which Mongo you're actually talking to at any point: `docker exec analytics-mongodb mongosh analytics --quiet --eval "db.metrics.countDocuments({})"` right after a test POST — if the count doesn't match what you just inserted, requests are going somewhere else.
+
+**`npm run dev` / `npm run preview` can leave an orphaned Node process running after you try to stop them (Windows).** Investigated directly by mapping the actual process tree with `Get-CimInstance Win32_Process`: `npm run dev` on Windows is never one process — it's `node.exe` (npm itself) spawning `cmd.exe /d /s /c vite`, which spawns a *second*, separate `node.exe` that's the real Vite dev server actually listening on the port. Killing the top-level npm process (however you do it — Ctrl+C in a console that isn't forwarding correctly, a script, a process manager) doesn't cascade down through `cmd.exe` to that second `node.exe`: Windows never auto-terminates child processes when a parent dies, unlike a Unix process-group signal. The `cmd.exe` hop and the real server can both survive indefinitely as orphans, still bound to the port, with nothing left tracking them.
+
+Fix that actually prevents it, not just cleans up after it: invoke Vite directly with `node`, skipping `npm run` (and the `cmd.exe` hop it creates on Windows) entirely:
+```bash
+node node_modules/vite/bin/vite.js          # instead of: npm run dev
+node node_modules/vite/bin/vite.js preview  # instead of: npm run preview
+```
+Confirmed directly: this produces exactly one `node.exe`, and terminating that one process (however it's stopped) leaves nothing behind — verified for both `dev` and `preview`, where the equivalent `npm run` form reliably orphaned a listener both times.
+
+If something still gets left behind (e.g. you used `npm run dev` anyway, or a crash left a stale listener), find and kill it by the port it's actually bound to — this works regardless of how deep the orphaned process tree is, since it doesn't depend on tracking any particular PID:
+```powershell
+# PowerShell
+Get-NetTCPConnection -LocalPort 5173 -State Listen | Select-Object -ExpandProperty OwningProcess | ForEach-Object { Stop-Process -Id $_ -Force }
+```
+```bash
+# Git Bash / WSL
+netstat -ano | grep ":5173.*LISTENING" | awk '{print $5}' | xargs -r -I{} taskkill //F //PID {}
+```
+(Swap `5173` for `4173` for `preview`, or `8000` for the backend — though the backend doesn't have this problem, since `uvicorn` is invoked as a single `python.exe` process directly, with no npm/`cmd.exe` layer to hop through.)
 
 ## Design decisions
 
@@ -282,6 +317,19 @@ Documented here as each phase introduces a real trade-off (not before — no dec
 - Verified the outage/recovery cycle against a real, running backend, not a mocked failure: killed the actual `uvicorn` process mid-session, confirmed the last-known-good data froze in place (relative-time labels climbed from "just now" to "20-30s ago" instead of resetting, proving no new data was silently arriving) and a "Trouble refreshing" indicator appeared in all three sections, then restarted the backend and confirmed the *same open page* recovered on its own next poll tick — no reload triggered.
 - The failed-poll guard also skips starting a new fetch if the previous one hasn't resolved yet (`isFetchingRef`) — not explicitly requested, but a natural extension of "handle a poll tick that fails" to slow-network conditions: without it, a fetch slower than 5s could stack overlapping requests instead of just waiting for the next clean tick.
 - `RefreshIndicator` is a new shared component, not folded into `LoadingState`/`ErrorState` — those two are deliberately *blocking* (replace the section's content), while refresh/trouble states are deliberately *non-blocking* (sit beside existing content). Conflating them risked exactly the bug this phase was about avoiding.
+
+**Phase 8:**
+- **`/api` prefix standardized** everywhere (backend `routers/analytics.py` + frontend `api/client.js`, one coordinated change) — resolves the inconsistency flagged back in Phase 4. Locked in with two regression tests (`TestApiPrefixConsistency`) that assert the *old* bare paths now 404 and every endpoint is reachable under `/api/`, and verified live: curled all 4 old paths (404) and all 4 new ones (200), then loaded the actual dashboard and confirmed every real browser request it made targeted `/api/...` with zero console errors.
+- **Two real bugs found and fixed during hardening, not hypothesized:**
+  - `MetricIn.value` accepted `NaN`/`Infinity` (`float(...)` and Pydantic's default JSON float parsing both allow them) — confirmed directly, then fixed with `Field(..., allow_inf_nan=False)`. Left unfixed, these would have silently entered a metric+source's rolling window and poisoned every z-score computed from it for the next `WINDOW_SIZE` events, since NaN propagates through mean/stdev and `abs(nan) > 3` is always `False` in Python — the one value that's obviously anomalous could never be flagged as one.
+  - Fixing bug #1 exposed a second one: FastAPI's *default* 422 handler echoes the rejected value back in the error's `input` field, and Starlette's `JSONResponse` correctly refuses to encode a raw `NaN`/`Infinity` (valid JSON has no such tokens) — so a rejected NaN was crashing into an opaque 500 instead of the clean 422 it should have produced. Confirmed live via curl before writing the fix: a custom `RequestValidationError` handler that sanitizes non-finite floats to their string form before the response is built.
+- **`GET /api/metrics/stats` and `/history`'s `minutes` param had no upper bound** — `timedelta(minutes=10**21)` raises an uncaught `OverflowError` (confirmed directly in a Python shell before adding the fix). Added `le=` a generous ~1-year ceiling; comfortably covers any real dashboard use case while turning that crash into a clean 422.
+- **MongoDB connectivity errors get one global handler** (`@app.exception_handler(PyMongoError)` in `main.py`), not five near-identical `try/except` blocks across every route. A Mongo failure mid-request — a restart, a network blip — now consistently returns 503, and any future endpoint gets the same protection automatically. `/health` keeps its own local try/except, since reporting *why* the DB is unreachable is that endpoint's entire job.
+- **Query-param validation was checked, not assumed already sufficient** — tried malformed `metric`, non-integer `minutes`, out-of-range `limit`, negative `minutes`, all already correctly rejected with 422 by Pydantic/FastAPI's existing `Literal`/`Query(gt=..., le=...)` constraints from earlier phases. No code added here — per this phase's own instruction not to invent problems that don't exist.
+- **`{metric, source, timestamp}` compound index: added.** Deferred in Phase 5 as "not asked for, negligible cost at toy data volumes" — revisited here because this phase is explicitly about re-evaluating that kind of deferral, and the query it serves (`detectors/zscore.py`'s rolling-window lookup) runs on *every single* `POST /api/metrics`, not an occasional dashboard read. `.explain()` on the exact query shape confirms `IXSCAN` on `metric_1_source_1_timestamp_-1` with equality bounds on both `metric` and `source` (`docsExamined == keysExamined == nReturned`), replacing the old metric-only-scan-then-filter-in-memory behavior.
+- **`compute_zscore()` extracted as a pure function** from `zscore.score()` (which is now a thin async Mongo-fetch wrapper around it) — this is what makes "deterministic input → known output" unit testing possible at all without mocking Motor's async cursor interface. `score()`'s own DB-fetching behavior is still exercised, just indirectly, through the integration tests that build a real rolling window via actual `POST /api/metrics` calls.
+- **Test isolation via `dependency_overrides`, not a real lifespan pointed at fake settings** — `tests/conftest.py`'s `api_client` fixture overrides `Depends(get_database)` app-wide rather than trying to reconfigure `settings.mongodb_uri`/`db_name` for tests. `TestClient(app)` still needed `with` (not bare) to keep one event loop alive across a test's multiple requests — confirmed by hitting "Event loop is closed" on the second request in a test before adding it. Also required refactoring `/health` to resolve its database via `Depends(get_database)` like every other route, instead of calling `get_database()` directly in the handler body (Phase 2's original code) — the direct-call version bypassed `dependency_overrides` entirely, making that one endpoint untestable against a test database.
+- Timestamp serialization's `.000000Z` edge case (Phase 6/7's fix) was checked and confirmed still in place — not redone.
 
 ## What I built vs what I'd add next
 

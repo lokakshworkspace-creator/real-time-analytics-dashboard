@@ -13,16 +13,25 @@ from pymongo.errors import OperationFailure
 
 from .config import settings
 
-# The indexes CLAUDE.md specifies for the `metrics` collection:
+# The indexes on the `metrics` collection:
 #   - metric_1_timestamp_-1: the dominant query pattern — recent data
-#     for one metric. Backs GET /metrics/latest (equality on metric,
-#     sorted by timestamp) and GET /metrics/stats ($match on metric +
-#     a timestamp range).
+#     for one metric. Backs GET /api/metrics/latest (equality on
+#     metric, sorted by timestamp) and GET /api/metrics/stats ($match
+#     on metric + a timestamp range).
 #   - timestamp_-1: queries across all metrics regardless of which one
 #     — e.g. a $sort/$group scan over the whole collection.
-#   - anomaly_1_timestamp_-1 (Phase 5): backs GET /metrics/anomalies —
-#     equality on anomaly=True, sorted by timestamp, same shape as the
-#     metric index above but for the anomaly panel's query pattern.
+#   - anomaly_1_timestamp_-1 (Phase 5): backs GET /api/metrics/anomalies
+#     — equality on anomaly=True, sorted by timestamp, same shape as
+#     the metric index above but for the anomaly panel's query pattern.
+#   - metric_1_source_1_timestamp_-1 (Phase 8): backs the z-score
+#     detector's rolling-window lookup in detectors/zscore.py —
+#     {metric, source} equality + a sorted/limited timestamp scan.
+#     Deferred in Phase 5 (not asked for then, negligible cost at toy
+#     data volumes); added now because this specific query runs on
+#     EVERY POST /api/metrics, not just an occasional dashboard read —
+#     it's the single hottest, most frequent query in the app, sitting
+#     directly on the write path. See zscore.py's docstring for the
+#     before/after.
 # Explicit names (rather than letting PyMongo auto-name them) make
 # re-running create_index() on every startup predictable: the same
 # name always maps to the same key spec, so db.metrics.getIndexes()
@@ -32,6 +41,7 @@ METRICS_INDEXES: list[tuple[list[tuple[str, int]], str]] = [
     ([("metric", 1), ("timestamp", -1)], "metric_1_timestamp_-1"),
     ([("timestamp", -1)], "timestamp_-1"),
     ([("anomaly", 1), ("timestamp", -1)], "anomaly_1_timestamp_-1"),
+    ([("metric", 1), ("source", 1), ("timestamp", -1)], "metric_1_source_1_timestamp_-1"),
 ]
 
 

@@ -47,28 +47,15 @@ class ZScoreResult:
     window_size: int  # how many prior points the verdict (or non-verdict) is based on
 
 
-async def score(
-    db: AsyncIOMotorDatabase, *, metric: str, source: str, value: float
-) -> ZScoreResult:
-    """Scores `value` against metric+source history already in MongoDB.
-
-    Must be called BEFORE the new event is inserted — the window is
-    built entirely from what's already stored, so it never includes the
-    point currently being scored. Uses `metric_1_timestamp_-1`'s metric
-    equality bound to narrow the scan; there's no metric+source index
-    (not requested for this phase — see README's Phase 5 design notes
-    for the trade-off), so the `source` filter is applied as a fetch
-    filter across that metric's documents rather than via its own index
-    range, which is fine at this project's data volume.
+def compute_zscore(window: list[float], value: float) -> ZScoreResult:
+    """Pure function: given a metric+source's prior values and a new
+    value, returns the verdict. No I/O, no MongoDB, no async — this is
+    the entire mathematical core of the detector, and the thing
+    backend/tests/test_zscore.py exercises directly with hand-built
+    windows for deterministic, known-output unit tests. score() below
+    is a thin async wrapper that only handles fetching `window` from
+    MongoDB before handing off to this function.
     """
-    cursor = db.metrics.find(
-        {"metric": metric, "source": source},
-        projection={"value": 1, "_id": 0},
-        sort=[("timestamp", -1)],
-        limit=WINDOW_SIZE,
-    )
-    window = [doc["value"] async for doc in cursor]
-
     if len(window) < MIN_WINDOW_SIZE:
         return ZScoreResult(is_anomaly=False, z_score=None, window_size=len(window))
 
@@ -88,3 +75,29 @@ async def score(
 
     z = (value - mean) / stdev
     return ZScoreResult(is_anomaly=abs(z) > Z_THRESHOLD, z_score=z, window_size=len(window))
+
+
+async def score(
+    db: AsyncIOMotorDatabase, *, metric: str, source: str, value: float
+) -> ZScoreResult:
+    """Scores `value` against metric+source history already in MongoDB.
+
+    Must be called BEFORE the new event is inserted — the window is
+    built entirely from what's already stored, so it never includes the
+    point currently being scored. Backed by the `metric_1_source_1_timestamp_-1`
+    index (see database.py) — equality on metric+source, then walked in
+    timestamp order for the limit(WINDOW_SIZE). Deferred in Phase 5 (a
+    plain `metric_1_timestamp_-1` scan-and-filter was "fine at this
+    project's data volume" then); added in Phase 8 once it was worth
+    pointing out that this exact query runs on every single ingest, not
+    just an occasional dashboard read — see README's Phase 8 design
+    notes.
+    """
+    cursor = db.metrics.find(
+        {"metric": metric, "source": source},
+        projection={"value": 1, "_id": 0},
+        sort=[("timestamp", -1)],
+        limit=WINDOW_SIZE,
+    )
+    window = [doc["value"] async for doc in cursor]
+    return compute_zscore(window, value)

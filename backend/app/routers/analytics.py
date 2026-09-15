@@ -1,10 +1,16 @@
-"""Read endpoints for dashboard consumption: GET /metrics/latest,
-GET /metrics/stats, GET /metrics/anomalies (Phase 5), and (as of
-Phase 6) GET /metrics/history.
+"""Read endpoints for dashboard consumption: GET /api/metrics/latest,
+GET /api/metrics/stats, GET /api/metrics/anomalies (Phase 5), and (as
+of Phase 6) GET /api/metrics/history.
 
-No `/api` prefix on these routes, matching CLAUDE.md's own endpoint
-list verbatim (`POST /api/metrics` vs. `GET /metrics/latest` — the
-brief documents that split, not an oversight here).
+Phase 8 note: these routes originally had no `/api` prefix, matching
+CLAUDE.md's own endpoint list verbatim (`POST /api/metrics` vs. bare
+`GET /metrics/latest`) — flagged in Phase 4 as an inconsistency to
+revisit, not fixed then because it wasn't in that phase's scope.
+Standardized here under one shared prefix (`/api`) for every route in
+the app, which is what "polish" means: consistent API surface, a
+single mental model for API consumers (including the frontend's
+api/client.js, updated in the same change), and one less thing to
+explain away as "deliberate" when it was really just deferred.
 """
 
 import asyncio
@@ -26,10 +32,19 @@ from ..models import (
     metric_document_to_latest,
 )
 
-router = APIRouter(tags=["analytics"])
+router = APIRouter(prefix="/api", tags=["analytics"])
 
 DEFAULT_STATS_WINDOW_MINUTES = 60
 DEFAULT_HISTORY_WINDOW_MINUTES = 60
+
+# Upper bound on `minutes` for /stats and /history (Phase 8 hardening).
+# Without it, an absurd value (e.g. a client typo with a dozen extra
+# digits) reaches `timedelta(minutes=minutes)` and raises an uncaught
+# OverflowError — confirmed directly: `timedelta(minutes=10**21)`
+# raises "Python int too large to convert to C int". A generous year-
+# long ceiling comfortably covers any real dashboard use case while
+# turning that crash into a clean 422 instead.
+MAX_WINDOW_MINUTES = 60 * 24 * 365
 
 
 @router.get("/metrics/latest", response_model=list[LatestMetric])
@@ -76,6 +91,7 @@ async def get_metric_stats(
     minutes: int = Query(
         default=DEFAULT_STATS_WINDOW_MINUTES,
         gt=0,
+        le=MAX_WINDOW_MINUTES,
         description="Size of the trailing window, in minutes.",
     ),
     db: AsyncIOMotorDatabase = Depends(get_database),
@@ -160,6 +176,7 @@ async def get_metric_history(
     minutes: int = Query(
         default=DEFAULT_HISTORY_WINDOW_MINUTES,
         gt=0,
+        le=MAX_WINDOW_MINUTES,
         description="Size of the trailing window, in minutes.",
     ),
     db: AsyncIOMotorDatabase = Depends(get_database),

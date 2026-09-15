@@ -5,10 +5,17 @@
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000'
 
+// Every backend route now lives under /api (Phase 8 — previously only
+// POST /metrics did, the three GET endpoints didn't; standardized as
+// one coordinated change with the backend, not two out-of-sync halves).
+// Prepended once here, not per-call below, so every current and future
+// endpoint function automatically matches whatever the backend does.
+const API_PREFIX = '/api'
+
 async function getJson(path) {
   let response
   try {
-    response = await fetch(`${API_BASE_URL}${path}`)
+    response = await fetch(`${API_BASE_URL}${API_PREFIX}${path}`)
   } catch {
     // fetch() itself throws on network failure (backend down, CORS
     // blocked, DNS, etc.) — normalize it into the same Error type a

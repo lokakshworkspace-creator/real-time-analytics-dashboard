@@ -38,7 +38,18 @@ class MetricIn(BaseModel):
     """Request body for POST /api/metrics."""
 
     metric: MetricName
-    value: float
+    # allow_inf_nan=False (Phase 8 hardening): Python's json module — and
+    # so Pydantic's default float parsing — accepts the non-standard
+    # tokens NaN/Infinity/-Infinity, which plain float() happily returns
+    # as real IEEE-754 values. Without this constraint those values
+    # would sail through validation and land in a metric+source's
+    # rolling window (detectors/zscore.py), silently poisoning every
+    # z-score computed from that window for the next WINDOW_SIZE events
+    # — NaN propagates through mean/stdev, and `abs(nan) > 3` is always
+    # False in Python, so a NaN value could never even be flagged as the
+    # anomaly it obviously is. Rejecting it at the API boundary (422) is
+    # far cheaper than reasoning about a poisoned rolling window later.
+    value: float = Field(..., allow_inf_nan=False)
     source: str = Field(..., min_length=1, description="Emitting host/service, e.g. 'server-2'.")
     timestamp: datetime | None = Field(
         default=None,
