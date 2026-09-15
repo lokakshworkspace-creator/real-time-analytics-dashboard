@@ -1,17 +1,24 @@
 import { useCallback } from 'react'
 import { getAnomalies } from '../api/client'
+import { POLL_INTERVAL_MS } from '../constants'
 import { useApiData } from '../hooks/useApiData'
 import { formatMetricValue, formatRelativeTime, METRIC_DISPLAY } from '../utils/formatters'
 import { ErrorState } from './ErrorState'
 import { LoadingState } from './LoadingState'
+import { RefreshIndicator } from './RefreshIndicator'
 
 export function AnomalyPanel() {
   const fetchFn = useCallback(() => getAnomalies(50), [])
-  const { data, loading, error } = useApiData(fetchFn)
+  const { data, loading, error, isRefreshing, pollError, lastUpdated } = useApiData(fetchFn, {
+    intervalMs: POLL_INTERVAL_MS,
+  })
 
   return (
     <section className="panel">
-      <h2 className="panel__title">Anomalies</h2>
+      <div className="section-header">
+        <h2 className="panel__title">Anomalies</h2>
+        <RefreshIndicator isRefreshing={isRefreshing} pollError={pollError} lastUpdated={lastUpdated} />
+      </div>
 
       {loading && <LoadingState label="Loading anomalies…" />}
       {error && <ErrorState error={error} label="Could not load anomalies" />}

@@ -1,6 +1,6 @@
 # Real-Time Data Analytics Dashboard
 
-> Status: Phase 6 (React dashboard) complete. Metric cards, a trend chart, and an anomaly panel all render real backend data on page load. No auto-refresh yet — that's Phase 7.
+> Status: Phase 7 (real-time polling) complete. The whole dashboard refreshes every 5s without ever blanking existing data, degrades gracefully on backend outages, and recovers automatically once the backend returns.
 
 A full-stack real-time analytics platform that ingests streaming metric events, stores them in MongoDB via a FastAPI backend, runs statistical anomaly detection, and visualizes trends and alerts in a React dashboard.
 
@@ -28,7 +28,7 @@ Simulator/Producer ──POST /api/metrics──▶ FastAPI ──▶ MongoDB
 - **Database:** MongoDB (local via Docker Compose, or Atlas free tier)
 - **Frontend:** React (Vite, JavaScript — not TypeScript, no strong reason to deviate from CLAUDE.md's plain-JS default), Recharts, `fetch` + `useState`/`useEffect`
 - **Anomaly detection:** z-score (MVP), Isolation Forest (stretch goal, kept separate)
-- **Real-time updates:** polling every 5s (stateless backend, trivial horizontal scaling — see rationale in Phase 5/7 notes once written)
+- **Real-time updates:** polling every 5s, not WebSockets/SSE — stateless backend (trivial horizontal scaling — no connection state to share across instances), and 5s is frequent enough for this app's update cadence. See Phase 7's Design decisions for how polling avoids blanking the UI on every refresh.
 
 ## Repository structure
 
@@ -51,12 +51,14 @@ Simulator/Producer ──POST /api/metrics──▶ FastAPI ──▶ MongoDB
   src/
     App.jsx                    Layout: header, metric cards row, chart + anomaly panel below
     api/client.js               fetch() wrapper, one function per GET endpoint
-    hooks/useApiData.js         Shared fetch-once-on-mount hook -> {data, loading, error}
+    constants.js                 POLL_INTERVAL_MS = 5000 (one named constant, used by all 3 pollers)
+    hooks/useApiData.js         Fetch-on-mount + optional polling -> {data, loading, error, isRefreshing, pollError, lastUpdated}
     components/
       MetricCardsRow.jsx / MetricCard.jsx   GET /metrics/latest, one card per metric
       TrendChart.jsx                        GET /metrics/history, Recharts line chart
       AnomalyPanel.jsx                      GET /metrics/anomalies
-      LoadingState.jsx / ErrorState.jsx     Shared loading/error presentation
+      LoadingState.jsx / ErrorState.jsx     Shared blocking loading/error presentation
+      RefreshIndicator.jsx                  Shared non-blocking "refreshing" / "trouble refreshing" indicator
     utils/formatters.js         Relative time, metric display units — presentational only
 docker-compose.yml   Local MongoDB
 .env.example         Environment variable template
@@ -139,7 +141,7 @@ npm run dev
 
 Opens at `http://localhost:5173` (Vite's default — confirmed empirically, not assumed, during Phase 6 verification; `FRONTEND_ORIGIN` in `.env` must match whatever port Vite actually prints). Reads `VITE_API_BASE_URL` from the **repo-root** `.env` (`vite.config.js` sets `envDir` up one level — see Design decisions), so no separate `frontend/.env` is needed.
 
-With the backend (and ideally the simulator, for real data) running, the dashboard fetches **once on page load** — metric cards, the CPU usage trend chart, and the anomaly panel each fetch independently and show their own loading spinner while pending and a clear red error box if the backend is unreachable. There is no auto-refresh yet; reload the page to see newer data. That interval/polling layer is Phase 7, deliberately not built here.
+With the backend (and ideally the simulator, for real data) running, the dashboard fetches on page load and then **every 5 seconds** — metric cards, the CPU usage trend chart, and the anomaly panel each poll independently. The first load of each shows a full loading spinner / red error box as before; every refresh after that leaves existing data on screen untouched and shows only a small "Refreshing…" pulse in that section's header while the new data is in flight. If a poll fails (e.g. the backend restarts mid-session), the last-known-good data stays exactly as it was and a small "⚠ Trouble refreshing — showing data from Ns ago" note appears instead of an error screen; the next successful poll clears it automatically, with no page reload needed.
 
 ## Data model
 
@@ -216,7 +218,7 @@ For each metric+source group with enough samples, it fits a fresh `IsolationFore
 4. ✅ Analytics endpoints (`/metrics/latest`, `/metrics/stats`, indexes)
 5. ✅ Anomaly detection (z-score on ingest, `/metrics/anomalies`); 5b: Isolation Forest (stretch) — ✅ both built
 6. ✅ React dashboard (metric cards, trend chart, anomaly panel, loading/error states)
-7. ⬜ Polling layer (`useEffect` + `setInterval`, cleanup on unmount)
+7. ✅ Polling layer (`useEffect` + `setInterval`, cleanup on unmount)
 8. ⬜ Polish (error handling, ObjectId serialization, unit tests for z-score)
 9. ⬜ Deployment (Docker for both services, Atlas + free API host + static frontend hosting)
 10. ⬜ Final README (architecture diagram, setup instructions, what I built vs what I'd add next)
@@ -271,6 +273,15 @@ Documented here as each phase introduces a real trade-off (not before — no dec
 - Metric **display units** (`%`, `ms`) are a frontend-only lookup table (`utils/formatters.js`) — the API returns bare numbers, on purpose (Phase 2's `MetricOut` was never going to carry presentation concerns), so "how to label a value" is decided once, in the one layer that actually renders it.
 - `vite.config.js` sets `envDir` to the repo root rather than adding a second `frontend/.env` — Vite loads env files from the project root by default, which would otherwise mean `VITE_API_BASE_URL` living in two places. One `.env`, shared by backend, docker-compose, and frontend, stays true to the Phase 1 scaffold's original design.
 - Confirmed rather than assumed (per this phase's explicit instruction): Vite's dev server really does default to port 5173 on this machine — checked its actual startup output — so `FRONTEND_ORIGIN=http://localhost:5173` in `.env` needed no change. Also confirmed the CORS preflight actually succeeds for that origin, not just that the numbers matched on paper.
+
+**Phase 7:**
+- `useApiData` was **extended**, not rewritten or duplicated: it's the same hook Phase 6 built, with an optional `{ intervalMs }` second argument. Omit it and the code path is identical to Phase 6 — confirmed live, not just by reading the code: temporarily called it with no options on one component while the other two kept `intervalMs` set, and watched network traffic over 12s — the no-options component made exactly 1 request, the other two made 4 each, side by side in the same running app.
+- The hook distinguishes "blocking" from "non-disruptive" not by *which call this is* (first vs. Nth) but by **whether real data already exists** (`hasDataRef`). That's the detail the whole correctness requirement hinges on: a poll retry after an initial failure (no data yet) still shows the full loading state — there's nothing on screen to preserve — while every poll after a real success only ever sets `isRefreshing`/`pollError` and leaves `data` completely untouched until a new result actually arrives. Getting this distinction right (data-presence, not call-count) is what makes "never blank existing data" actually hold in the failure-after-success case, not just the happy path.
+- Verified the "no re-blanking" requirement by continuous observation, not a spot-check: sampled the DOM every 300ms for 17s (>3 poll cycles) and confirmed `.status-state--loading` was absent in all 55 samples, while the metric cards' actual values changed between the first and last sample (proving polling was genuinely happening, not just not-blanking because nothing was fetched).
+- Verified `clearInterval` actually runs, not just that it's present in the code: loaded the dashboard, confirmed 12 requests fired over 11s while mounted, navigated to `about:blank` (unmounting the whole React tree), then watched for 17 more seconds — zero further requests. An interval that leaked past unmount would have kept firing into a dead component tree; it didn't.
+- Verified the outage/recovery cycle against a real, running backend, not a mocked failure: killed the actual `uvicorn` process mid-session, confirmed the last-known-good data froze in place (relative-time labels climbed from "just now" to "20-30s ago" instead of resetting, proving no new data was silently arriving) and a "Trouble refreshing" indicator appeared in all three sections, then restarted the backend and confirmed the *same open page* recovered on its own next poll tick — no reload triggered.
+- The failed-poll guard also skips starting a new fetch if the previous one hasn't resolved yet (`isFetchingRef`) — not explicitly requested, but a natural extension of "handle a poll tick that fails" to slow-network conditions: without it, a fetch slower than 5s could stack overlapping requests instead of just waiting for the next clean tick.
+- `RefreshIndicator` is a new shared component, not folded into `LoadingState`/`ErrorState` — those two are deliberately *blocking* (replace the section's content), while refresh/trouble states are deliberately *non-blocking* (sit beside existing content). Conflating them risked exactly the bug this phase was about avoiding.
 
 ## What I built vs what I'd add next
 

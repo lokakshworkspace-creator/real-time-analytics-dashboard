@@ -1,15 +1,22 @@
 import { useCallback } from 'react'
 import { getLatestMetrics } from '../api/client'
+import { POLL_INTERVAL_MS } from '../constants'
 import { useApiData } from '../hooks/useApiData'
 import { METRIC_NAMES } from '../utils/formatters'
 import { ErrorState } from './ErrorState'
 import { LoadingState } from './LoadingState'
 import { MetricCard } from './MetricCard'
+import { RefreshIndicator } from './RefreshIndicator'
 
 export function MetricCardsRow() {
   const fetchFn = useCallback(() => getLatestMetrics(), [])
-  const { data, loading, error } = useApiData(fetchFn)
+  const { data, loading, error, isRefreshing, pollError, lastUpdated } = useApiData(fetchFn, {
+    intervalMs: POLL_INTERVAL_MS,
+  })
 
+  // These two only ever apply before the very first successful fetch —
+  // once we have data, later poll failures go through pollError instead
+  // (see useApiData), so this section is never blanked by a bad poll.
   if (loading) return <LoadingState label="Loading metrics…" />
   if (error) return <ErrorState error={error} label="Could not load metric cards" />
 
@@ -21,10 +28,16 @@ export function MetricCardsRow() {
   const byMetric = Object.fromEntries((data ?? []).map((entry) => [entry.metric, entry]))
 
   return (
-    <div className="metric-cards-row">
-      {METRIC_NAMES.map((metric) => (
-        <MetricCard key={metric} metric={metric} entry={byMetric[metric] ?? null} />
-      ))}
-    </div>
+    <section className="metric-cards-section">
+      <div className="section-header">
+        <h2 className="panel__title">Metrics</h2>
+        <RefreshIndicator isRefreshing={isRefreshing} pollError={pollError} lastUpdated={lastUpdated} />
+      </div>
+      <div className="metric-cards-row">
+        {METRIC_NAMES.map((metric) => (
+          <MetricCard key={metric} metric={metric} entry={byMetric[metric] ?? null} />
+        ))}
+      </div>
+    </section>
   )
 }
