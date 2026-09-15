@@ -47,8 +47,8 @@ class MetricIn(BaseModel):
 
 
 def _format_utc_z(dt: datetime) -> str:
-    """Always renders UTC ISO-8601 with an explicit 'Z', matching the
-    data model in CLAUDE.md (e.g. "2026-08-30T10:31:06Z").
+    """Always renders UTC ISO-8601 with an explicit 'Z' AND a fixed-width
+    6-digit fractional-seconds field, e.g. "2026-08-30T10:31:06.000000Z".
 
     Motor/PyMongo store BSON dates as UTC but hand them back as *naive*
     datetimes (no tzinfo) — Pydantic's default datetime serialization
@@ -57,12 +57,21 @@ def _format_utc_z(dt: datetime) -> str:
     where it came from) and convert an aware one to UTC, so the output
     format is identical either way. Shared by every response model
     below instead of repeating this logic per model.
+
+    Explicit strftime("...%f") instead of dt.isoformat(): isoformat()
+    silently *omits* the microseconds field whenever it's exactly 0
+    (a value landing on a whole second, e.g. no explicit timestamp was
+    given and datetime.now() happened to round cleanly, or a
+    hand-constructed test timestamp) — producing "...06Z" one time and
+    "...06.325000Z" the next, purely depending on the value, not a
+    format decision. %f is always zero-padded to 6 digits regardless,
+    so every response has the identical shape.
     """
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     else:
         dt = dt.astimezone(timezone.utc)
-    return dt.isoformat().replace("+00:00", "Z")
+    return dt.strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
 
 
 class MetricOut(BaseModel):
@@ -148,3 +157,44 @@ class MetricStats(BaseModel):
     avg: float
     min: float
     max: float
+
+
+class AnomalyEvent(BaseModel):
+    """One entry in GET /metrics/anomalies (Phase 5).
+
+    Its own model, not a reuse of MetricOut/LatestMetric, for the same
+    reason those two are separate from each other: distinct endpoint,
+    distinct contract. This one also carries `z_score` — the number the
+    z-score detector actually computed for this event (see
+    detectors/zscore.py) — which is the whole point of an anomaly
+    panel: not just "flagged", but "flagged, and here's by how much".
+    """
+
+    id: str
+    metric: str
+    value: float
+    source: str
+    timestamp: datetime
+    anomaly: bool
+    z_score: float | None = Field(
+        default=None,
+        description="The z-score that triggered this flag. None if the document predates "
+        "Phase 5 or was flagged when a verdict wasn't possible (shouldn't normally happen "
+        "for anomaly=True, but the field stays optional rather than assumed).",
+    )
+
+    @field_serializer("timestamp")
+    def serialize_timestamp(self, dt: datetime) -> str:
+        return _format_utc_z(dt)
+
+
+def metric_document_to_anomaly(document: dict) -> AnomalyEvent:
+    return AnomalyEvent(
+        id=str(document["_id"]),
+        metric=document["metric"],
+        value=document["value"],
+        source=document["source"],
+        timestamp=document["timestamp"],
+        anomaly=document.get("anomaly", False),
+        z_score=document.get("z_score"),
+    )

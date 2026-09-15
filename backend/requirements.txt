@@ -7,3 +7,7 @@ python-dotenv>=1.0,<2.0
 
 # simulator.py only (standalone HTTP client, no other backend module needs it)
 requests>=2.32,<3.0
+
+# detectors/isolation_forest.py only (Phase 5b stretch detector — never
+# imported by the live ingest path, see that module's docstring)
+scikit-learn>=1.5,<1.7

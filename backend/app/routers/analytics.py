@@ -1,12 +1,7 @@
-"""Read endpoints for dashboard consumption: GET /metrics/latest and
-GET /metrics/stats.
+"""Read endpoints for dashboard consumption: GET /metrics/latest,
+GET /metrics/stats, and (as of Phase 5) GET /metrics/anomalies.
 
-Phase 4 scope only — no anomaly data exists yet (that's Phase 5), so
-there is deliberately no GET /metrics/anomalies here: an endpoint that
-can only ever return an empty list isn't worth shipping until it has
-something to return.
-
-No `/api` prefix on these two routes, matching CLAUDE.md's own endpoint
+No `/api` prefix on these routes, matching CLAUDE.md's own endpoint
 list verbatim (`POST /api/metrics` vs. `GET /metrics/latest` — the
 brief documents that split, not an oversight here).
 """
@@ -20,9 +15,11 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from ..database import get_database
 from ..models import (
     METRIC_NAMES,
+    AnomalyEvent,
     LatestMetric,
     MetricName,
     MetricStats,
+    metric_document_to_anomaly,
     metric_document_to_latest,
 )
 
@@ -122,3 +119,32 @@ async def get_metric_stats(
         min=stats["min"],
         max=stats["max"],
     )
+
+
+@router.get("/metrics/anomalies", response_model=list[AnomalyEvent])
+async def get_anomalies(
+    limit: int = Query(default=50, gt=0, le=500, description="Max events to return."),
+    metric: MetricName | None = Query(
+        default=None, description="Restrict to one metric, e.g. 'cpu_usage'."
+    ),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+) -> list[AnomalyEvent]:
+    """Flagged events, newest first — the z-score detector's own record
+    of what it flagged and why (see detectors/zscore.py; the `z_score`
+    field on each result is what actually triggered it).
+
+    {anomaly: True} + sort by timestamp is exactly what the
+    `anomaly_1_timestamp_-1` index (see database.py) is built for. When
+    `metric` is also given, that filter is applied as a post-scan fetch
+    filter rather than its own index range (there's no anomaly+metric
+    compound index) — still fine here, since the anomaly index already
+    does the expensive part: skipping every non-flagged document
+    without a full collection scan.
+    """
+    query_filter: dict = {"anomaly": True}
+    if metric:
+        query_filter["metric"] = metric
+
+    cursor = db.metrics.find(query_filter).sort("timestamp", -1).limit(limit)
+    documents = [doc async for doc in cursor]
+    return [metric_document_to_anomaly(doc) for doc in documents]

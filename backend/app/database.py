@@ -13,13 +13,16 @@ from pymongo.errors import OperationFailure
 
 from .config import settings
 
-# The two indexes CLAUDE.md specifies for the `metrics` collection:
+# The indexes CLAUDE.md specifies for the `metrics` collection:
 #   - metric_1_timestamp_-1: the dominant query pattern — recent data
 #     for one metric. Backs GET /metrics/latest (equality on metric,
 #     sorted by timestamp) and GET /metrics/stats ($match on metric +
 #     a timestamp range).
 #   - timestamp_-1: queries across all metrics regardless of which one
 #     — e.g. a $sort/$group scan over the whole collection.
+#   - anomaly_1_timestamp_-1 (Phase 5): backs GET /metrics/anomalies —
+#     equality on anomaly=True, sorted by timestamp, same shape as the
+#     metric index above but for the anomaly panel's query pattern.
 # Explicit names (rather than letting PyMongo auto-name them) make
 # re-running create_index() on every startup predictable: the same
 # name always maps to the same key spec, so db.metrics.getIndexes()
@@ -28,6 +31,7 @@ from .config import settings
 METRICS_INDEXES: list[tuple[list[tuple[str, int]], str]] = [
     ([("metric", 1), ("timestamp", -1)], "metric_1_timestamp_-1"),
     ([("timestamp", -1)], "timestamp_-1"),
+    ([("anomaly", 1), ("timestamp", -1)], "anomaly_1_timestamp_-1"),
 ]
 
 

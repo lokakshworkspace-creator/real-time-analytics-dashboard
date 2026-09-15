@@ -1,6 +1,6 @@
 # Real-Time Data Analytics Dashboard
 
-> Status: Phase 4 (analytics endpoints) complete. Backend ingests, stores, indexes, and now serves read-side aggregates (`/metrics/latest`, `/metrics/stats`). No anomaly detection yet, no frontend.
+> Status: Phase 5 (anomaly detection) complete. z-score detection runs live on every ingested event; Isolation Forest exists as a separate, offline comparison tool. No frontend yet.
 
 A full-stack real-time analytics platform that ingests streaming metric events, stores them in MongoDB via a FastAPI backend, runs statistical anomaly detection, and visualizes trends and alerts in a React dashboard.
 
@@ -38,10 +38,13 @@ Simulator/Producer ──POST /api/metrics──▶ FastAPI ──▶ MongoDB
     main.py       FastAPI app, CORS, lifespan (Mongo connect/close), GET /health
     config.py     Settings (reads .env at repo root, sane localhost defaults)
     database.py   Motor client lifecycle + get_database() dependency + ensure_indexes()
-    models.py     MetricIn/MetricOut/LatestMetric/MetricStats (Pydantic v2) + ObjectId→str conversion
+    models.py     MetricIn/MetricOut/LatestMetric/MetricStats/AnomalyEvent (Pydantic v2) + ObjectId→str conversion
+    detectors/
+      zscore.py             MVP detector — runs live on every POST /api/metrics
+      isolation_forest.py   Phase 5b stretch — offline only, invoked via `python -m`
     routers/
-      metrics.py    POST /api/metrics (validate + store only — no detection yet)
-      analytics.py  GET /metrics/latest, GET /metrics/stats (aggregation pipeline)
+      metrics.py    POST /api/metrics (validate, run z-score detection, store)
+      analytics.py  GET /metrics/latest, /metrics/stats, /metrics/anomalies
   simulator.py  Standalone synthetic event producer, POSTs to the API over HTTP
   requirements.txt
 /frontend   React (Vite) dashboard (not yet implemented)
@@ -134,10 +137,10 @@ Simulated metrics: `orders`, `response_time`, `cpu_usage`, `failed_requests`, `m
 
 | Method | Path | Purpose | Status |
 |---|---|---|---|
-| POST | `/api/metrics` | Ingest one event, validate, store | ✅ (detection still a no-op — Phase 5) |
+| POST | `/api/metrics` | Ingest one event, validate, run z-score detection, store | ✅ |
 | GET | `/metrics/latest?source=` | Most recent document per metric (optionally filtered by source) | ✅ |
 | GET | `/metrics/stats?metric=X&minutes=60` | count/avg/min/max for one metric over a trailing window, via aggregation pipeline | ✅ |
-| GET | `/metrics/anomalies?limit=50` | Flagged events | ⬜ Phase 5 — no anomaly data exists yet, so there's nothing to build here until then |
+| GET | `/metrics/anomalies?limit=50&metric=X` | Flagged events, newest first | ✅ |
 
 Note the deliberate path inconsistency: ingestion is `/api/metrics`, the three read endpoints are bare `/metrics/...`. That's what CLAUDE.md's own endpoint list specifies, not an oversight — kept as-is rather than "fixed".
 
@@ -155,13 +158,33 @@ curl "http://localhost:8000/metrics/stats?metric=cpu_usage&minutes=60"
 ```
 `minutes` defaults to 60 if omitted. Returns **404** if there's no data for that metric in the window (not a 200 with zeroed-out numbers — see Design decisions).
 
+**`GET /metrics/anomalies` example:**
+```bash
+curl http://localhost:8000/metrics/anomalies
+curl "http://localhost:8000/metrics/anomalies?metric=cpu_usage&limit=10"
+# [{"id":"...","metric":"cpu_usage","value":94.6,"source":"server-1","timestamp":"...Z","anomaly":true,"z_score":4.83}, ...]
+```
+
+## Anomaly detection
+
+**z-score (live, MVP — `detectors/zscore.py`).** Runs synchronously inside `POST /api/metrics`, before the new event is inserted. For the incoming event's exact `metric`+`source` pair, it pulls up to the last 30 stored values (the rolling window), computes their mean and sample stdev, and flags the new value if `|z| > 3`. Below 10 prior points ("cold start"), or if the window is perfectly constant (`stdev == 0`), no verdict is possible and the event is stored as `anomaly: false` rather than erroring or guessing. The z-score itself is persisted on every document (`z_score` field) — not just the boolean — so every flag (or non-flag) is inspectable after the fact, not just asserted.
+
+Known, real limitation observed while testing this phase: a value already **in** the rolling window can mask detection of a similar value that follows it — the first outlier drags the window's mean and stdev up, which can pull a second, equally extreme value's z-score back under the threshold. Confirmed directly: two identical extreme values posted back-to-back scored `z=None` (cold start) then `z=2.85` (just under the 3.0 cutoff) — not `z=huge, z=huge`. This isn't a bug in the implementation; it's an inherent property of a small rolling-window z-score, worth being able to name honestly rather than claim the detector catches everything.
+
+**Isolation Forest (offline only, Phase 5b stretch — `detectors/isolation_forest.py`).** Never runs inside the ingest path and never writes to the `anomaly` field — it's a comparison tool, invoked on demand:
+```bash
+cd backend
+python -m app.detectors.isolation_forest --minutes 120
+```
+For each metric+source group with enough samples, it fits a fresh `IsolationForest` (one feature: the value itself, mirroring z-score's own single-variable scope) and prints every event either detector flagged, labeled `BOTH flag` / `IF only` / `z-score only`, plus a summary. See Design decisions below for what running it actually showed.
+
 ## Phase plan
 
 1. ✅ Scaffold (repo structure, README skeleton, `.env.example`, Docker Compose for local MongoDB)
 2. ✅ Backend foundation (FastAPI app, Motor connection, Pydantic models, `POST /api/metrics`, CORS)
 3. ✅ Simulator (posts realistic events on an interval, with deliberate spikes)
 4. ✅ Analytics endpoints (`/metrics/latest`, `/metrics/stats`, indexes)
-5. ⬜ Anomaly detection (z-score on ingest, `/metrics/anomalies`); 5b: Isolation Forest (stretch)
+5. ✅ Anomaly detection (z-score on ingest, `/metrics/anomalies`); 5b: Isolation Forest (stretch) — ✅ both built
 6. ⬜ React dashboard (metric cards, trend chart, anomaly panel, loading/error states)
 7. ⬜ Polling layer (`useEffect` + `setInterval`, cleanup on unmount)
 8. ⬜ Polish (error handling, ObjectId serialization, unit tests for z-score)
@@ -201,6 +224,13 @@ Documented here as each phase introduces a real trade-off (not before — no dec
 - Indexes are created with **explicit names** (`metric_1_timestamp_-1`, `timestamp_-1`) rather than left to PyMongo's auto-naming, and wrapped in a per-index try/except around `create_index()`. Repeated calls with an unchanged key spec are already no-ops in MongoDB; the explicit name + try/except only matters for the case where a name later points at a different key spec (e.g. this list changes in some future phase) — that raises `OperationFailure`, and one bad index definition shouldn't take the whole API down at startup.
 - `GET /metrics/stats` returns **404**, not a 200 with `count: 0, avg: null, ...`, when the window has no data. A "no answer" and "the answer is zero" are different things, and a null-filled 200 is easy to mistake for a real (if boring) result.
 - `LatestMetric` and `MetricStats` are new, separate Pydantic models rather than reusing `MetricOut` for `/metrics/latest` — even though today the fields largely overlap, each endpoint's contract is conceptually distinct (a live snapshot vs. "the document just written"), and giving each its own type keeps the OpenAPI docs and any future frontend types honest about which endpoint produced them. The UTC-`Z` timestamp formatting logic itself is still shared (one `_format_utc_z()` helper), so the duplication is only the model shape, not the serialization behavior.
+
+**Phase 5:**
+- Detection is scoped to metric+**source** (not metric alone) — a rolling window mixing `server-1`'s and `server-2`'s `cpu_usage` would treat each server's own normal range as noise in someone else's baseline. There's no `metric+source` compound index for this query, though (only `metric_1_timestamp_-1` and `timestamp_-1` exist) — the `source` filter is applied as a fetch-time filter across that metric's documents rather than its own index range. Deliberately not added: this phase's instructions only asked for one new index (`anomaly_1_timestamp_-1`), and at this project's data volume the extra scan cost is negligible. At real production scale this would be the first index to add.
+- `z_score` is persisted on every document but deliberately **not** added to `MetricOut` or `LatestMetric`'s response shape — only `AnomalyEvent` (`GET /metrics/anomalies`) surfaces it. Storing it costs nothing and makes every flag inspectable later; exposing it on every metric card wasn't asked for and would be schema growth beyond what this phase needed.
+- Isolation Forest's `contamination` parameter is left at scikit-learn's `"auto"` default rather than hand-tuned to the simulator's actual known spike rate (~1-in-30-to-50 events). Tuning it to a number pulled from `simulator.py`'s own source would be fitting the detector to the test data — a real deployment doesn't get to peek at its own anomaly rate in advance.
+- **What comparing the two actually showed** (see `python -m app.detectors.isolation_forest`, run against ~414 live events): z-score flagged 7 events; Isolation Forest flagged 133 — and every one of z-score's 7 was inside that 133 (100% overlap from z-score's side). The other ~126 "IF only" flags were, on inspection, ordinary in-range values (e.g. `cpu_usage` at 41.5% and 66.9%, both squarely inside its 40-75% normal band). The honest read: with only 18-39 samples per metric+source group, `IsolationForest` doesn't have enough data to calibrate a stable anomaly boundary, and `"auto"` contamination ends up wildly over-flagging as a result — this is not "Isolation Forest is smarter and catches more," it's a real limitation of applying an ensemble method the original paper designed for hundreds-to-thousands of samples to rolling windows this small. Documented here rather than hidden so it's possible to talk about honestly, per CLAUDE.md's whole point in asking for this comparison in the first place.
+- A single outlier already sitting inside the rolling window can mask a subsequent, equally-extreme value — confirmed directly during cold-start testing (two back-to-back `value=999` posts scored `z=None` then `z=2.85`, not `z=huge` twice). Documented as a known property of small-window z-score, not silently smoothed over.
 
 ## What I built vs what I'd add next
 
