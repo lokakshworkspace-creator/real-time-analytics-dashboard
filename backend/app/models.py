@@ -198,3 +198,26 @@ def metric_document_to_anomaly(document: dict) -> AnomalyEvent:
         anomaly=document.get("anomaly", False),
         z_score=document.get("z_score"),
     )
+
+
+class HistoryPoint(BaseModel):
+    """One entry in GET /metrics/history (Phase 6).
+
+    Deliberately minimal — just what a trend chart needs to plot a
+    point — not a reuse of MetricOut/AnomalyEvent, which carry an `id`
+    and other fields no chart axis needs. This endpoint was added
+    specifically so the frontend can render real history on mount with
+    one fetch, without needing the client-side polling loop that's
+    reserved for Phase 7.
+    """
+
+    timestamp: datetime
+    value: float
+
+    @field_serializer("timestamp")
+    def serialize_timestamp(self, dt: datetime) -> str:
+        return _format_utc_z(dt)
+
+
+def metric_document_to_history_point(document: dict) -> HistoryPoint:
+    return HistoryPoint(timestamp=document["timestamp"], value=document["value"])

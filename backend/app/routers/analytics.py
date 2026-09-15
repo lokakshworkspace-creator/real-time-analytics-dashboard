@@ -1,5 +1,6 @@
 """Read endpoints for dashboard consumption: GET /metrics/latest,
-GET /metrics/stats, and (as of Phase 5) GET /metrics/anomalies.
+GET /metrics/stats, GET /metrics/anomalies (Phase 5), and (as of
+Phase 6) GET /metrics/history.
 
 No `/api` prefix on these routes, matching CLAUDE.md's own endpoint
 list verbatim (`POST /api/metrics` vs. `GET /metrics/latest` — the
@@ -16,16 +17,19 @@ from ..database import get_database
 from ..models import (
     METRIC_NAMES,
     AnomalyEvent,
+    HistoryPoint,
     LatestMetric,
     MetricName,
     MetricStats,
     metric_document_to_anomaly,
+    metric_document_to_history_point,
     metric_document_to_latest,
 )
 
 router = APIRouter(tags=["analytics"])
 
 DEFAULT_STATS_WINDOW_MINUTES = 60
+DEFAULT_HISTORY_WINDOW_MINUTES = 60
 
 
 @router.get("/metrics/latest", response_model=list[LatestMetric])
@@ -148,3 +152,38 @@ async def get_anomalies(
     cursor = db.metrics.find(query_filter).sort("timestamp", -1).limit(limit)
     documents = [doc async for doc in cursor]
     return [metric_document_to_anomaly(doc) for doc in documents]
+
+
+@router.get("/metrics/history", response_model=list[HistoryPoint])
+async def get_metric_history(
+    metric: MetricName,
+    minutes: int = Query(
+        default=DEFAULT_HISTORY_WINDOW_MINUTES,
+        gt=0,
+        description="Size of the trailing window, in minutes.",
+    ),
+    db: AsyncIOMotorDatabase = Depends(get_database),
+) -> list[HistoryPoint]:
+    """Raw (timestamp, value) points for one metric over a trailing
+    window, oldest first — added in Phase 6 specifically so the trend
+    chart can render real history from a single fetch on mount, without
+    needing the client-side polling loop that's reserved for Phase 7.
+
+    $match on {metric, timestamp: {$gte: ...}} sorted by timestamp is
+    the same shape /metrics/stats uses, so it's served by the same
+    `metric_1_timestamp_-1` index — ascending order is still covered,
+    since MongoDB can walk a descending index in reverse.
+
+    Returns an empty list (200), not a 404, when there's no data in the
+    window — unlike /metrics/stats, an empty list isn't a missing
+    answer, it's a legitimate (if boring) chart with no points yet.
+    """
+    window_start = datetime.now(timezone.utc) - timedelta(minutes=minutes)
+
+    cursor = db.metrics.find(
+        {"metric": metric, "timestamp": {"$gte": window_start}},
+        projection={"timestamp": 1, "value": 1, "_id": 0},
+        sort=[("timestamp", 1)],
+    )
+    documents = [doc async for doc in cursor]
+    return [metric_document_to_history_point(doc) for doc in documents]
