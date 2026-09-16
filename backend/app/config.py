@@ -20,6 +20,13 @@ ENV_PATH = REPO_ROOT / ".env"
 class Settings(BaseSettings):
     mongodb_uri: str = "mongodb://localhost:27017"
     mongodb_db_name: str = "analytics"
+    # Comma-separated list, not a single origin (Phase 9 deployment):
+    # local dev (http://localhost:5173) and a deployed frontend need to
+    # both work against the same backend at once — a developer testing
+    # locally against a deployed API, or just wanting local dev to keep
+    # working after the frontend is deployed, shouldn't need to edit
+    # .env and restart every time they switch contexts. See main.py's
+    # CORS setup and README's Phase 9 design notes.
     frontend_origin: str = "http://localhost:5173"
 
     model_config = SettingsConfigDict(
@@ -27,6 +34,10 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
     )
+
+    @property
+    def frontend_origins(self) -> list[str]:
+        return [origin.strip() for origin in self.frontend_origin.split(",") if origin.strip()]
 
 
 @lru_cache

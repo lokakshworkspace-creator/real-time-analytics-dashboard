@@ -29,13 +29,15 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Real-Time Data Analytics Dashboard API", lifespan=lifespan)
 
-# Single allowed origin (the Vite dev server) rather than "*": this API
-# is never meant to be called from arbitrary origins, and allow_origins
-# must be an explicit list (not "*") for allow_credentials=True to be
-# valid per the CORS spec.
+# An explicit allowlist (never "*") — this API is never meant to be
+# called from arbitrary origins, and allow_origins must be an explicit
+# list for allow_credentials=True to be valid per the CORS spec.
+# settings.frontend_origins supports more than one entry (comma-
+# separated in FRONTEND_ORIGIN) specifically so local dev and a
+# deployed frontend can both be allowed at once — see config.py.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[settings.frontend_origin],
+    allow_origins=settings.frontend_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
