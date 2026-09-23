@@ -1,30 +1,36 @@
 import './App.css'
 import { AnomalyPanel } from './components/AnomalyPanel'
-import { MetricCardsRow } from './components/MetricCardsRow'
-import { TrendChart } from './components/TrendChart'
+import { InventoryRiskTable } from './components/InventoryRiskTable'
+import { KpiCardsRow } from './components/KpiCardsRow'
+import { ProductPerformanceTable } from './components/ProductPerformanceTable'
+import { RegionsChart } from './components/RegionsChart'
 
-// Three independent sections, each fetching its own data (see
-// MetricCardsRow/TrendChart/AnomalyPanel) rather than App fetching
-// everything and passing it down as props: each stays self-contained
-// and fails independently — the anomaly panel showing its own error
-// state doesn't blank out the metric cards next to it, and each one
-// can grow its own Phase 7 polling interval later without the others
-// needing to know about it.
+// Each section fetches its own data (see KpiCardsRow/RegionsChart/
+// ProductPerformanceTable/InventoryRiskTable/AnomalyPanel) rather than
+// App fetching everything and passing it down as props: each stays
+// self-contained and fails independently — one section's error state
+// doesn't blank out the sections next to it, and each one owns its own
+// polling interval without the others needing to know about it.
 function App() {
   return (
     <div className="dashboard">
       <header className="dashboard__header">
-        <h1>Real-Time Data Analytics Dashboard</h1>
+        <h1>Real-Time E-Commerce Analytics Dashboard</h1>
         <p className="dashboard__subtitle">
-          Synthetic metric stream — see the simulator, not live production data.
+          Synthetic order stream — see the simulator, not live production data.
         </p>
       </header>
 
-      <MetricCardsRow />
+      <KpiCardsRow />
 
       <div className="dashboard__lower">
-        <TrendChart />
+        <RegionsChart />
         <AnomalyPanel />
+      </div>
+
+      <div className="dashboard__lower">
+        <ProductPerformanceTable />
+        <InventoryRiskTable />
       </div>
     </div>
   )

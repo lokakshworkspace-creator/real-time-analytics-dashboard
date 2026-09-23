@@ -1,30 +1,14 @@
-import { formatMetricValue, formatRelativeTime, METRIC_DISPLAY } from '../utils/formatters'
-
-// One card. `entry` is the matching object from GET /metrics/latest,
-// or null if that metric has no data yet (see MetricCardsRow) — Phase
-// 4 deliberately omits metrics with zero events rather than padding
-// the response, so the frontend is the layer that turns "absent" into
-// an honest "No data yet" card instead of just not showing a 5th card
-// at all (fixed 5-card layout, not a shifting one).
-export function MetricCard({ metric, entry }) {
-  const { label } = METRIC_DISPLAY[metric] ?? { label: metric }
-
+// One KPI card: a label and a pre-formatted value. Deliberately generic
+// (no metric-name lookup, no per-card anomaly/source/timestamp meta) —
+// unlike the old system-metrics dashboard, these four cards all come
+// from a single GET /api/orders/kpis response, not one document per
+// card, so there's no per-card "is this stale" or "is this anomalous"
+// state to show.
+export function MetricCard({ label, value }) {
   return (
-    <div className={`metric-card${entry?.anomaly ? ' metric-card--anomaly' : ''}`}>
+    <div className="metric-card">
       <div className="metric-card__label">{label}</div>
-
-      {entry ? (
-        <>
-          <div className="metric-card__value">{formatMetricValue(metric, entry.value)}</div>
-          <div className="metric-card__meta">
-            <span>{entry.source}</span>
-            <span>{formatRelativeTime(entry.timestamp)}</span>
-          </div>
-          {entry.anomaly && <div className="metric-card__badge">Anomaly</div>}
-        </>
-      ) : (
-        <div className="metric-card__empty">No data yet</div>
-      )}
+      <div className="metric-card__value">{value}</div>
     </div>
   )
 }

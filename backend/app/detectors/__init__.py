@@ -1,18 +1,19 @@
 """Anomaly detectors, kept deliberately separate from routers/models.
 
-Two independently-testable modules, per CLAUDE.md's ground rule that the
-live detector must always be unambiguous:
+- zscore.py  The only detector in this app. Runs on every POST
+             /api/orders (detection-on-write); its verdict is what gets
+             stored as the `anomaly` field. `compute_zscore` is the pure
+             math core (unit-tested directly in
+             backend/tests/test_zscore.py); `score_order_volume` is the
+             async wrapper that fetches a region's hourly order-count
+             history from MongoDB before handing off to it.
 
-- zscore.py            The MVP detector. Runs on every POST /api/metrics
-                        (detection-on-write); its verdict is what gets
-                        stored as the `anomaly` field.
-- isolation_forest.py  Phase 5b stretch. Never runs automatically and
-                        never touches the `anomaly` field — it's an
-                        on-demand, offline comparison tool, invoked
-                        separately (see its own docstring).
-
-Nothing here imports the other detector module, and neither imports
-from routers/ — both take plain values in, return a verdict out, so
-either can be unit-tested with no FastAPI or MongoDB involved beyond
-what each explicitly wires up itself.
+An Isolation Forest detector (scikit-learn) previously lived here as a
+Phase 5b stretch-goal comparison tool, kept deliberately out of the live
+ingest path. It was removed when the system-metrics track it scored
+(cpu_usage/memory_usage/response_time) was replaced by this
+business-analytics track — it scored raw per-event metric values, which
+has no direct equivalent now that detection runs on hourly order-volume
+buckets per region. Re-adding an alternate/offline detector for this
+domain is a documented "next step", not a built feature.
 """

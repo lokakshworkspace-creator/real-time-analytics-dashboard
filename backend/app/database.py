@@ -13,35 +13,41 @@ from pymongo.errors import OperationFailure
 
 from .config import settings
 
-# The indexes on the `metrics` collection:
-#   - metric_1_timestamp_-1: the dominant query pattern — recent data
-#     for one metric. Backs GET /api/metrics/latest (equality on
-#     metric, sorted by timestamp) and GET /api/metrics/stats ($match
-#     on metric + a timestamp range).
-#   - timestamp_-1: queries across all metrics regardless of which one
-#     — e.g. a $sort/$group scan over the whole collection.
-#   - anomaly_1_timestamp_-1 (Phase 5): backs GET /api/metrics/anomalies
-#     — equality on anomaly=True, sorted by timestamp, same shape as
-#     the metric index above but for the anomaly panel's query pattern.
-#   - metric_1_source_1_timestamp_-1 (Phase 8): backs the z-score
-#     detector's rolling-window lookup in detectors/zscore.py —
-#     {metric, source} equality + a sorted/limited timestamp scan.
-#     Deferred in Phase 5 (not asked for then, negligible cost at toy
-#     data volumes); added now because this specific query runs on
-#     EVERY POST /api/metrics, not just an occasional dashboard read —
-#     it's the single hottest, most frequent query in the app, sitting
-#     directly on the write path. See zscore.py's docstring for the
-#     before/after.
+# Indexes on the `orders` collection (an append-only event log):
+#   - region_1_timestamp_-1: backs GET /api/orders/regions ($match on a
+#     region-scoped window isn't needed today, but the region-hour
+#     order-volume detector in detectors/zscore.py runs this exact
+#     shape — {region, timestamp range} — on every single POST
+#     /api/orders, so it's the hottest, most frequent query in the app.
+#   - anomaly_1_timestamp_-1: backs GET /api/anomalies/business —
+#     equality on anomaly=True, sorted by timestamp, same shape as the
+#     old metrics anomaly index.
+#   - product_id_1_region_1_timestamp_-1: backs GET /api/inventory/risk's
+#     recent-demand aggregation ({product_id, region} equality + a
+#     timestamp range) and is a superset of the plain
+#     {product_id, region} shape the inventory decrement lookup uses.
+# Indexes on the `inventory` collection (a mutable current-state doc per
+# product+region, not an event log):
+#   - product_id_1_region_1 (unique): one document per product+region.
+#     Backs the seed upsert, the per-order stock decrement, and the
+#     inventory-risk lookup. Unique so a seed re-run or a race between
+#     two orders for the same product+region can never fork into two
+#     stock records that silently disagree with each other.
 # Explicit names (rather than letting PyMongo auto-name them) make
-# re-running create_index() on every startup predictable: the same
-# name always maps to the same key spec, so db.metrics.getIndexes()
-# reads the same list of indexes as this constant, no matter how many
-# times the app has restarted.
-METRICS_INDEXES: list[tuple[list[tuple[str, int]], str]] = [
-    ([("metric", 1), ("timestamp", -1)], "metric_1_timestamp_-1"),
-    ([("timestamp", -1)], "timestamp_-1"),
-    ([("anomaly", 1), ("timestamp", -1)], "anomaly_1_timestamp_-1"),
-    ([("metric", 1), ("source", 1), ("timestamp", -1)], "metric_1_source_1_timestamp_-1"),
+# re-running create_index() on every startup predictable: the same name
+# always maps to the same key spec.
+ORDERS_INDEXES: list[tuple[list[tuple[str, int]], str, dict]] = [
+    ([("region", 1), ("timestamp", -1)], "region_1_timestamp_-1", {}),
+    ([("anomaly", 1), ("timestamp", -1)], "anomaly_1_timestamp_-1", {}),
+    (
+        [("product_id", 1), ("region", 1), ("timestamp", -1)],
+        "product_id_1_region_1_timestamp_-1",
+        {},
+    ),
+]
+
+INVENTORY_INDEXES: list[tuple[list[tuple[str, int]], str, dict]] = [
+    ([("product_id", 1), ("region", 1)], "product_id_1_region_1", {"unique": True}),
 ]
 
 
@@ -64,24 +70,31 @@ async def close_mongo_connection() -> None:
 
 
 async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
-    """Creates the `metrics` indexes, safe to call on every startup.
+    """Creates the `orders` and `inventory` indexes, safe to call on
+    every startup.
 
     create_index() is already idempotent in the normal case — MongoDB
-    no-ops if an index with the same name *and* the same key spec
-    already exists, it doesn't error or duplicate it. The explicit
-    try/except below exists for the one case that isn't a silent no-op:
-    if a given name ever pointed to a *different* key spec (e.g. this
-    list changes in a later phase, or a stale index survived from an
-    earlier version of this codebase), create_index() raises
-    OperationFailure instead of just updating it in place. That should
-    be loud, but it shouldn't take the whole API down at startup, so we
-    log it and continue rather than letting it propagate.
+    no-ops if an index with the same name *and* the same key spec/
+    options already exists. The explicit try/except below exists for
+    the one case that isn't a silent no-op: if a given name ever pointed
+    to a *different* spec (e.g. this list changes in a later revision,
+    or a stale index survived from an earlier version of this codebase),
+    create_index() raises OperationFailure instead of updating it in
+    place. That should be loud, but it shouldn't take the whole API down
+    at startup, so we log it and continue rather than letting it
+    propagate.
     """
-    for keys, name in METRICS_INDEXES:
+    for keys, name, options in ORDERS_INDEXES:
         try:
-            await db.metrics.create_index(keys, name=name)
+            await db.orders.create_index(keys, name=name, **options)
         except OperationFailure as exc:
-            print(f"WARNING: could not create index '{name}' on metrics: {exc}")
+            print(f"WARNING: could not create index '{name}' on orders: {exc}")
+
+    for keys, name, options in INVENTORY_INDEXES:
+        try:
+            await db.inventory.create_index(keys, name=name, **options)
+        except OperationFailure as exc:
+            print(f"WARNING: could not create index '{name}' on inventory: {exc}")
 
 
 def get_database() -> AsyncIOMotorDatabase:

@@ -49,10 +49,6 @@
   position: relative;
 }
 
-.metric-card--anomaly {
-  border-color: var(--danger);
-}
-
 .metric-card__label {
   font-size: 0.8rem;
   color: var(--text-muted);
@@ -65,35 +61,6 @@
   font-size: 1.7rem;
   font-weight: 600;
   line-height: 1.1;
-  margin-bottom: 10px;
-}
-
-.metric-card__meta {
-  display: flex;
-  justify-content: space-between;
-  font-size: 0.78rem;
-  color: var(--text-muted);
-}
-
-.metric-card__empty {
-  color: var(--text-muted);
-  font-size: 0.9rem;
-  font-style: italic;
-  padding: 6px 0 2px;
-}
-
-.metric-card__badge {
-  position: absolute;
-  top: 12px;
-  right: 12px;
-  background: var(--danger-bg);
-  color: var(--danger);
-  font-size: 0.68rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-  padding: 2px 7px;
-  border-radius: 999px;
 }
 
 /* --- Lower section: chart + anomaly panel --- */
@@ -138,6 +105,80 @@
   color: var(--text-muted);
   font-size: 0.9rem;
   margin: 0;
+}
+
+.panel__subtitle {
+  margin: 0 0 8px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+/* --- Data tables (product performance, inventory risk) --- */
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.data-table th {
+  text-align: left;
+  color: var(--text-muted);
+  font-weight: 600;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 4px 8px 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.data-table td {
+  padding: 6px 8px 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.data-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.product-performance {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+}
+
+@media (max-width: 640px) {
+  .product-performance {
+    grid-template-columns: 1fr;
+  }
+}
+
+.risk-badge {
+  display: inline-block;
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+
+.risk-badge--high {
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+
+.risk-badge--medium {
+  background: var(--warning-bg);
+  color: var(--warning);
+}
+
+.risk-badge--low {
+  background: var(--success-bg);
+  color: var(--success);
 }
 
 /* --- Anomaly list --- */

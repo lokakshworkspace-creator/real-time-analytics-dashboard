@@ -5,11 +5,9 @@
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000'
 
-// Every backend route now lives under /api (Phase 8 — previously only
-// POST /metrics did, the three GET endpoints didn't; standardized as
-// one coordinated change with the backend, not two out-of-sync halves).
-// Prepended once here, not per-call below, so every current and future
-// endpoint function automatically matches whatever the backend does.
+// Every backend route lives under /api. Prepended once here, not per-
+// call below, so every current and future endpoint function
+// automatically matches whatever the backend does.
 const API_PREFIX = '/api'
 
 async function getJson(path) {
@@ -39,15 +37,26 @@ async function getJson(path) {
   return response.json()
 }
 
-export function getLatestMetrics(source) {
-  const query = source ? `?source=${encodeURIComponent(source)}` : ''
-  return getJson(`/metrics/latest${query}`)
+export function getOrderKpis(minutes = 60) {
+  return getJson(`/orders/kpis?minutes=${minutes}`)
 }
 
-export function getMetricHistory(metric, minutes = 60) {
-  return getJson(`/metrics/history?metric=${encodeURIComponent(metric)}&minutes=${minutes}`)
+export function getRegionStats(minutes = 60) {
+  return getJson(`/orders/regions?minutes=${minutes}`)
 }
 
-export function getAnomalies(limit = 50) {
-  return getJson(`/metrics/anomalies?limit=${limit}`)
+export function getProductStats(minutes = 60, limit = 10, order = 'top') {
+  return getJson(`/orders/products?minutes=${minutes}&limit=${limit}&order=${order}`)
+}
+
+export function getInventory() {
+  return getJson('/inventory')
+}
+
+export function getInventoryRisk(minutes = 1440, lowStockThreshold = 20) {
+  return getJson(`/inventory/risk?minutes=${minutes}&low_stock_threshold=${lowStockThreshold}`)
+}
+
+export function getBusinessAnomalies(limit = 50) {
+  return getJson(`/anomalies/business?limit=${limit}`)
 }

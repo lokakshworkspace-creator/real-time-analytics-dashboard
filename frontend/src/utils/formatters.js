@@ -1,29 +1,23 @@
-// The 5 metrics this app knows about, in a fixed display order —
-// mirrors backend/app/models.py's METRIC_NAMES. Duplicated rather than
-// shared: frontend and backend are separate language runtimes here,
-// so there's no single source of truth to import from without adding
-// a build step just to share one list of strings.
-export const METRIC_NAMES = ['orders', 'response_time', 'cpu_usage', 'failed_requests', 'memory_usage']
+// Presentational formatting shared across the dashboard's sections —
+// the API returns plain numbers and ISO timestamps; how they're
+// displayed (currency symbol, thousands separators, relative time) is
+// decided here, not something the backend needs to know about.
 
-// Display-only metadata (label + unit). The API never returns a unit —
-// value is just a number — so this is purely presentational, decided
-// here in the frontend, not something the backend needs to know about.
-export const METRIC_DISPLAY = {
-  orders: { label: 'Orders', unit: '' },
-  response_time: { label: 'Response Time', unit: 'ms' },
-  cpu_usage: { label: 'CPU Usage', unit: '%' },
-  failed_requests: { label: 'Failed Requests', unit: '' },
-  memory_usage: { label: 'Memory Usage', unit: '%' },
+const currencyFormatter = new Intl.NumberFormat('en-US', {
+  style: 'currency',
+  currency: 'USD',
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+})
+
+export function formatCurrency(value) {
+  return currencyFormatter.format(value ?? 0)
 }
 
-export function formatMetricValue(metric, value) {
-  const unit = METRIC_DISPLAY[metric]?.unit ?? ''
-  // response_time/orders/failed_requests are whole numbers in practice;
-  // cpu_usage/memory_usage carry one decimal (see simulator.py's
-  // `decimals` per metric) — round to at most 1 decimal place so the
-  // display never shows more false precision than the source data has.
-  const rounded = Math.round(value * 10) / 10
-  return unit ? `${rounded}${unit}` : `${rounded}`
+const integerFormatter = new Intl.NumberFormat('en-US')
+
+export function formatInteger(value) {
+  return integerFormatter.format(value ?? 0)
 }
 
 // "5s ago" / "3m ago" / "2h ago" — deliberately coarse (no library):
@@ -48,8 +42,8 @@ export function formatRelativeTime(isoTimestamp) {
   return `${days}d ago`
 }
 
-export function formatClockTime(isoTimestamp) {
-  const date = new Date(isoTimestamp)
-  if (Number.isNaN(date.getTime())) return '--:--:--'
-  return date.toLocaleTimeString([], { hour12: false })
+export const RISK_LABEL = {
+  HIGH: 'High',
+  MEDIUM: 'Medium',
+  LOW: 'Low',
 }

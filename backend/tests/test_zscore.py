@@ -2,10 +2,14 @@
 
 Every test here calls compute_zscore() directly with a hand-built
 window — no MongoDB, no async, no FastAPI. That's the point of
-detectors/zscore.py's score()/compute_zscore() split (see that
-module's docstring): the entire decision logic is a pure function of
-(window, value), so "deterministic input -> known output" is exactly
-what these tests are.
+detectors/zscore.py's score_order_volume()/compute_zscore() split (see
+that module's docstring): the entire decision logic is a pure function
+of (window, value), so "deterministic input -> known output" is exactly
+what these tests are. compute_zscore() itself is unchanged from the
+earlier system-metrics detector — only what score_order_volume() feeds
+it (hourly order counts per region, not raw metric readings) is new,
+and that async/DB-dependent wiring is exercised instead by
+test_orders_api.py's end-to-end anomaly tests.
 """
 
 import statistics
@@ -48,9 +52,9 @@ class TestExtremeValues:
         assert result.window_size == MIN_WINDOW_SIZE
 
     def test_extreme_low_value_is_flagged_with_a_negative_zscore(self):
-        # Anomalies aren't only "too high" — orders.py's simulated
-        # spikes go toward zero on purpose (see simulator.py). |z| is
-        # what matters, not the sign.
+        # |z| is what matters, not the sign — a sudden collapse in a
+        # region's hourly order count is just as much an anomaly as a
+        # spike.
         result = compute_zscore(TIGHT_WINDOW, -500)
 
         assert result.is_anomaly is True

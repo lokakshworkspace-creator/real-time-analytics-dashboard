@@ -1,26 +1,23 @@
-"""Synthetic event producer for the Real-Time Data Analytics Dashboard.
+"""Synthetic order-event producer for the e-commerce analytics
+dashboard.
 
-Posts one metric event per tick to POST /api/metrics over plain HTTP -
+Posts one order event per tick to POST /api/orders over plain HTTP -
 this script never imports from `app/` or touches MongoDB directly. That's
-deliberate: in the real architecture (see CLAUDE.md), a metric producer
+deliberate: in the real architecture (see CLAUDE.md), an order producer
 is just another client of the API, same as any other service would be.
 Keeping the simulator an HTTP client instead of a DB writer means it
-exercises the exact same validation/storage path a real producer would
-hit, and it can run against a remote/deployed backend later with zero
-changes.
+exercises the exact same validation/storage/detection path a real
+producer would hit.
 
-Lives at backend/simulator.py rather than a top-level `simulator/`
-folder: it's a single ~200-line script with one dependency (`requests`,
-already installable into the same venv as the backend), not a project
-of its own. A dedicated top-level folder would suggest more structure
-than one file needs; living next to `app/` keeps it discoverable without
-implying it's part of the FastAPI package (it doesn't import `app` at
-all - only reachability, HTTP POST).
+On startup, seeds a starting stock level for every product+region
+combination via POST /api/inventory/seed before posting any orders -
+otherwise every order's inventory decrement would silently no-op
+against a product+region nothing has ever seeded (see
+routers/orders.py's warning-and-continue behavior for that case).
 
 Run:    python simulator.py [--url URL] [--interval SECONDS] [--duration SECONDS]
 Stop:   Ctrl+C - the loop catches KeyboardInterrupt, closes its HTTP
-        session, and prints a summary. No subprocesses/threads are
-        spawned, so there's nothing that can be left orphaned.
+        session, and prints a summary.
 """
 
 from __future__ import annotations
@@ -29,84 +26,95 @@ import argparse
 import os
 import random
 import time
+import uuid
 from dataclasses import dataclass
 
 import requests
 
-SOURCES = ["server-1", "server-2", "server-3"]
+REGIONS = ["North America", "Europe", "Asia Pacific", "Latin America", "Middle East"]
 
-# How many normal events occur, on average, between deliberate spikes.
-# Re-randomized after every spike so the cadence isn't perfectly
-# periodic (a real anomaly detector shouldn't be able to learn "every
-# exactly 40th event is bad").
-SPIKE_EVERY_MIN = 30
-SPIKE_EVERY_MAX = 50
+# Relative likelihood of an order landing in each region - deliberately
+# uneven so regional KPIs/charts have real differences to show, not five
+# near-identical bars. Same length/order as REGIONS.
+REGION_WEIGHTS = [0.35, 0.30, 0.20, 0.10, 0.05]
 
 
 @dataclass(frozen=True)
-class MetricProfile:
-    """Describes one metric's believable everyday range and its
-    deliberately-way-outside-that-range spike range.
-
-    normal_mean/normal_stdev drive a Gaussian, clipped to normal_range,
-    so values wander with a realistic shape (some fluctuation, no wild
-    jumps) instead of being uniform noise. spike_range is intentionally
-    far from normal_range in every case - the ask was for spikes a
-    z-score detector obviously should catch, not borderline values.
-    """
-
-    normal_range: tuple[float, float]
-    normal_mean: float
-    normal_stdev: float
-    spike_range: tuple[float, float]
-    unit: str
-    decimals: int = 1
+class Product:
+    product_id: str
+    product_name: str
+    category: str
+    unit_price: float
 
 
-# Ranges below are illustrative - chosen to *look and move* like a real
-# system's metrics, not measured from one. There is no production
-# system behind this data; see the README's "synthetic data" note.
-METRIC_PROFILES: dict[str, MetricProfile] = {
-    "cpu_usage": MetricProfile(
-        normal_range=(40, 75), normal_mean=57, normal_stdev=8,
-        spike_range=(92, 99), unit="%", decimals=1,
-    ),
-    "response_time": MetricProfile(
-        normal_range=(150, 250), normal_mean=200, normal_stdev=20,
-        spike_range=(800, 1500), unit="ms", decimals=0,
-    ),
-    "memory_usage": MetricProfile(
-        normal_range=(50, 80), normal_mean=65, normal_stdev=6,
-        spike_range=(95, 99), unit="%", decimals=1,
-    ),
-    "failed_requests": MetricProfile(
-        normal_range=(0, 5), normal_mean=2, normal_stdev=1.5,
-        spike_range=(40, 80), unit="count", decimals=0,
-    ),
-    # Orders spikes *down*, not up: a sudden collapse to near-zero is
-    # the anomaly that actually matters operationally (an outage or a
-    # broken checkout flow), whereas an unusually busy period is a good
-    # day, not an incident. Modeling both directions the same way would
-    # be the "no cargo-culting" violation CLAUDE.md warns about.
-    "orders": MetricProfile(
-        normal_range=(20, 80), normal_mean=50, normal_stdev=15,
-        spike_range=(0, 2), unit="count", decimals=0,
-    ),
-}
+PRODUCTS = [
+    Product("sku-001", "Wireless Earbuds", "Electronics", 59.99),
+    Product("sku-002", "Running Shoes", "Apparel", 89.99),
+    Product("sku-003", "Stainless Water Bottle", "Home & Kitchen", 24.99),
+    Product("sku-004", "Mechanical Keyboard", "Electronics", 119.99),
+    Product("sku-005", "Yoga Mat", "Sporting Goods", 34.99),
+]
+
+# Relative likelihood of an order being for each product - uneven for
+# the same reason as REGION_WEIGHTS: some products should visibly
+# outsell others in the product-performance table. Same length/order as
+# PRODUCTS.
+PRODUCT_WEIGHTS = [0.40, 0.25, 0.15, 0.12, 0.08]
+
+STARTING_STOCK = 300
+
+# Chance any given order is a deliberate demand spike (15-40 units in
+# one order) rather than a normal 1-3 unit purchase - enough to
+# occasionally push a region's hourly order *count* baseline (the thing
+# the z-score detector actually watches - see detectors/zscore.py) and
+# to stress inventory risk, without dominating the data.
+SPIKE_CHANCE = 0.02
+SPIKE_QUANTITY_RANGE = (15, 40)
+NORMAL_QUANTITY_RANGE = (1, 3)
 
 
-def generate_value(profile: MetricProfile, spike: bool) -> float:
-    if spike:
-        value = random.uniform(*profile.spike_range)
-    else:
-        value = random.gauss(profile.normal_mean, profile.normal_stdev)
-        low, high = profile.normal_range
-        value = max(low, min(high, value))  # keep "normal" believable, not just Gaussian tails
-    return round(value, profile.decimals)
+def seed_inventory(session: requests.Session, base_url: str) -> None:
+    endpoint = f"{base_url}/api/inventory/seed"
+    print(f"Seeding inventory -> POST {endpoint} ({len(PRODUCTS)} products x {len(REGIONS)} regions)")
+    for product in PRODUCTS:
+        for region in REGIONS:
+            payload = {
+                "product_id": product.product_id,
+                "product_name": product.product_name,
+                "category": product.category,
+                "region": region,
+                # Small spread around STARTING_STOCK so regions don't
+                # all start perfectly identical.
+                "current_stock": STARTING_STOCK + random.randint(-20, 20),
+            }
+            try:
+                response = session.post(endpoint, json=payload, timeout=5)
+                response.raise_for_status()
+            except requests.exceptions.RequestException as exc:
+                print(f"  FAILED to seed {product.product_id}/{region}: {exc}")
+    print("Inventory seeded.\n")
 
 
-def post_metric(session: requests.Session, endpoint: str, payload: dict) -> tuple[bool, str]:
-    """POSTs one event. Never raises - connection problems are reported
+def generate_order(spike: bool) -> dict:
+    product = random.choices(PRODUCTS, weights=PRODUCT_WEIGHTS, k=1)[0]
+    region = random.choices(REGIONS, weights=REGION_WEIGHTS, k=1)[0]
+    quantity = (
+        random.randint(*SPIKE_QUANTITY_RANGE) if spike else random.randint(*NORMAL_QUANTITY_RANGE)
+    )
+
+    return {
+        "order_id": str(uuid.uuid4()),
+        "product_id": product.product_id,
+        "product_name": product.product_name,
+        "category": product.category,
+        "quantity": quantity,
+        "unit_price": product.unit_price,
+        "region": region,
+    }
+
+
+def post_order(session: requests.Session, endpoint: str, payload: dict) -> tuple[bool, str]:
+    """POSTs one order. Never raises - connection problems are reported
     back as (False, reason) so the caller can log and keep going instead
     of crashing the whole simulator over one bad request.
     """
@@ -124,45 +132,36 @@ def post_metric(session: requests.Session, endpoint: str, payload: dict) -> tupl
     return False, f"unexpected status {response.status_code}: {response.text[:200]}"
 
 
-def run(endpoint: str, interval: float, duration: float | None) -> None:
+def run(base_url: str, interval: float, duration: float | None) -> None:
     session = requests.Session()
+    seed_inventory(session, base_url)
+
+    orders_endpoint = f"{base_url}/api/orders"
     event_count = 0
     failure_count = 0
-    events_since_spike = 0
-    next_spike_at = random.randint(SPIKE_EVERY_MIN, SPIKE_EVERY_MAX)
     start = time.monotonic()
 
-    print(f"Simulator started -> POST {endpoint}  (interval={interval}s)")
+    print(f"Simulator started -> POST {orders_endpoint}  (interval={interval}s)")
     print("Synthetic data for demo purposes only - not live production traffic.")
     print("Press Ctrl+C to stop.\n")
 
     try:
         while duration is None or (time.monotonic() - start) < duration:
-            metric_name = random.choice(list(METRIC_PROFILES))
-            profile = METRIC_PROFILES[metric_name]
-            source = random.choice(SOURCES)
+            is_spike = random.random() < SPIKE_CHANCE
+            payload = generate_order(is_spike)
 
-            events_since_spike += 1
-            is_spike = events_since_spike >= next_spike_at
-            if is_spike:
-                events_since_spike = 0
-                next_spike_at = random.randint(SPIKE_EVERY_MIN, SPIKE_EVERY_MAX)
-
-            value = generate_value(profile, is_spike)
-            payload = {"metric": metric_name, "value": value, "source": source}
-
-            ok, error = post_metric(session, endpoint, payload)
+            ok, error = post_order(session, orders_endpoint, payload)
             event_count += 1
-            tag = "*** SPIKE ***" if is_spike else "normal"
+            tag = "*** DEMAND SPIKE ***" if is_spike else "normal"
 
             if ok:
                 print(
-                    f"[{event_count:>5}] {metric_name:<15} {value:>8}{profile.unit:<5} "
-                    f"source={source:<10} {tag}"
+                    f"[{event_count:>5}] {payload['product_name']:<24} qty={payload['quantity']:>3}  "
+                    f"region={payload['region']:<15} {tag}"
                 )
             else:
                 failure_count += 1
-                print(f"[{event_count:>5}] FAILED  {metric_name:<15} source={source:<10} -> {error}")
+                print(f"[{event_count:>5}] FAILED  {payload['product_name']:<24} -> {error}")
 
             time.sleep(interval)
     except KeyboardInterrupt:
@@ -191,8 +190,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    endpoint = args.url.rstrip("/") + "/api/metrics"
-    run(endpoint, args.interval, args.duration)
+    run(args.url.rstrip("/"), args.interval, args.duration)
 
 
 if __name__ == "__main__":

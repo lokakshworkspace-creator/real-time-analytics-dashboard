@@ -7,6 +7,10 @@
   --accent: #3b6ef6;
   --danger: #d64545;
   --danger-bg: #fdecec;
+  --warning: #b45309;
+  --warning-bg: #fef3c7;
+  --success: #15803d;
+  --success-bg: #dcfce7;
   color-scheme: light;
 }
 
@@ -20,6 +24,10 @@
     --accent: #6f96ff;
     --danger: #ff6b6b;
     --danger-bg: #3a1f22;
+    --warning: #fbbf24;
+    --warning-bg: #3a2f14;
+    --success: #4ade80;
+    --success-bg: #163a24;
     color-scheme: dark;
   }
 }

@@ -1,60 +1,18 @@
-"""Pydantic v2 models for the metrics API.
+"""Pydantic v2 models for the e-commerce business analytics API.
 
-Two models instead of one: MetricIn is what a client is allowed to send
-(no `anomaly` field — clients don't get to self-report that), MetricOut
-is what the API returns (includes server-computed fields). Keeping them
-separate means the input validation surface and the response contract
-can evolve independently, e.g. Phase 5 will change how `anomaly` gets
-set without touching what clients are allowed to POST.
+This replaces the earlier generic system-metrics models (cpu_usage,
+memory_usage, response_time, ...) entirely — this dashboard now tracks
+order events and inventory, not synthetic server metrics. Same
+In/Out-per-resource pattern as before: a client's request body and the
+server's response are always distinct models, even when field sets
+overlap, so the input contract and the response contract can evolve
+independently.
 """
 
 from datetime import datetime, timezone
-from typing import Literal, get_args
+from typing import Literal
 
 from pydantic import BaseModel, Field, field_serializer
-
-# The five metrics this MVP simulates and displays (see CLAUDE.md). A
-# Literal instead of a bare str catches typos/garbage metric names at
-# the API boundary instead of letting them silently pollute the
-# collection. Trade-off: adding a new metric means editing this type,
-# which is an intentional, small bit of friction rather than silent
-# schema drift.
-MetricName = Literal[
-    "orders",
-    "response_time",
-    "cpu_usage",
-    "failed_requests",
-    "memory_usage",
-]
-
-# Single source of truth for "all 5 metric names" as a plain iterable —
-# used by GET /metrics/latest (Phase 4) to know what to look up without
-# duplicating this list a second time and risking it drifting out of
-# sync with the Literal above.
-METRIC_NAMES: tuple[str, ...] = get_args(MetricName)
-
-
-class MetricIn(BaseModel):
-    """Request body for POST /api/metrics."""
-
-    metric: MetricName
-    # allow_inf_nan=False (Phase 8 hardening): Python's json module — and
-    # so Pydantic's default float parsing — accepts the non-standard
-    # tokens NaN/Infinity/-Infinity, which plain float() happily returns
-    # as real IEEE-754 values. Without this constraint those values
-    # would sail through validation and land in a metric+source's
-    # rolling window (detectors/zscore.py), silently poisoning every
-    # z-score computed from that window for the next WINDOW_SIZE events
-    # — NaN propagates through mean/stdev, and `abs(nan) > 3` is always
-    # False in Python, so a NaN value could never even be flagged as the
-    # anomaly it obviously is. Rejecting it at the API boundary (422) is
-    # far cheaper than reasoning about a poisoned rolling window later.
-    value: float = Field(..., allow_inf_nan=False)
-    source: str = Field(..., min_length=1, description="Emitting host/service, e.g. 'server-2'.")
-    timestamp: datetime | None = Field(
-        default=None,
-        description="UTC event time. Defaults to server receive time if omitted.",
-    )
 
 
 def _format_utc_z(dt: datetime) -> str:
@@ -70,13 +28,10 @@ def _format_utc_z(dt: datetime) -> str:
     below instead of repeating this logic per model.
 
     Explicit strftime("...%f") instead of dt.isoformat(): isoformat()
-    silently *omits* the microseconds field whenever it's exactly 0
-    (a value landing on a whole second, e.g. no explicit timestamp was
-    given and datetime.now() happened to round cleanly, or a
-    hand-constructed test timestamp) — producing "...06Z" one time and
-    "...06.325000Z" the next, purely depending on the value, not a
-    format decision. %f is always zero-padded to 6 digits regardless,
-    so every response has the identical shape.
+    silently *omits* the microseconds field whenever it's exactly 0,
+    producing "...06Z" one time and "...06.325000Z" the next, purely
+    depending on the value. %f is always zero-padded to 6 digits
+    regardless, so every response has the identical shape.
     """
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
@@ -85,113 +40,105 @@ def _format_utc_z(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
 
 
-class MetricOut(BaseModel):
-    """Response body for a stored metric document (POST /api/metrics)."""
+# --- Orders -----------------------------------------------------------
+
+PaymentStatus = Literal["success", "failed", "refunded"]
+
+
+class OrderIn(BaseModel):
+    """Request body for POST /api/orders."""
+
+    order_id: str = Field(..., min_length=1)
+    timestamp: datetime | None = Field(
+        default=None,
+        description="UTC event time. Defaults to server receive time if omitted.",
+    )
+    product_id: str = Field(..., min_length=1)
+    product_name: str = Field(..., min_length=1)
+    category: str = Field(..., min_length=1)
+    quantity: int = Field(..., gt=0)
+    unit_price: float = Field(..., gt=0)
+    region: str = Field(..., min_length=1)
+    payment_status: PaymentStatus = "success"
+
+
+class OrderOut(BaseModel):
+    """Response body for a stored order document (POST/GET /api/orders).
+
+    `total_value` is server-computed (quantity * unit_price) rather than
+    trusted from the client — a client could send a mismatched value
+    otherwise, and every downstream aggregation (KPIs, regional/product
+    revenue) depends on this number being correct. `anomaly` reflects
+    the region's order-volume z-score at ingest time (see
+    detectors/zscore.py's score_order_volume) — it is never client-
+    supplied.
+    """
 
     id: str
+    order_id: str
     timestamp: datetime
-    metric: str
-    value: float
-    source: str
-    anomaly: bool = Field(
-        default=False,
-        description="Always False for now — z-score detection is wired in during Phase 5.",
-    )
+    product_id: str
+    product_name: str
+    category: str
+    quantity: int
+    unit_price: float
+    total_value: float
+    region: str
+    payment_status: PaymentStatus
+    anomaly: bool
 
     @field_serializer("timestamp")
     def serialize_timestamp(self, dt: datetime) -> str:
         return _format_utc_z(dt)
 
 
-def metric_document_to_out(document: dict) -> MetricOut:
+def order_document_to_out(document: dict) -> OrderOut:
     """Converts a raw MongoDB document into the API response model.
 
     Motor returns plain dicts with a BSON ObjectId in `_id`, which has
     no default JSON encoding FastAPI/Pydantic can use. Rather than
     writing a custom Pydantic type for ObjectId, we convert it to a
-    plain string at this one boundary — simpler to read and explain,
-    and it's the only place in the codebase that needs to know Mongo
-    stores ids as ObjectId at all.
+    plain string at this one boundary.
     """
-    return MetricOut(
+    return OrderOut(
         id=str(document["_id"]),
+        order_id=document["order_id"],
         timestamp=document["timestamp"],
-        metric=document["metric"],
-        value=document["value"],
-        source=document["source"],
+        product_id=document["product_id"],
+        product_name=document["product_name"],
+        category=document["category"],
+        quantity=document["quantity"],
+        unit_price=document["unit_price"],
+        total_value=document["total_value"],
+        region=document["region"],
+        payment_status=document["payment_status"],
         anomaly=document.get("anomaly", False),
     )
 
 
-class LatestMetric(BaseModel):
-    """One entry in the response of GET /metrics/latest.
+class BusinessAnomalyEvent(BaseModel):
+    """One entry in GET /api/anomalies/business.
 
-    Structurally similar to MetricOut, but kept as its own model rather
-    than reused: this endpoint's contract (one snapshot per metric,
-    always the newest) is conceptually different from "the document
-    POST /api/metrics just created", and giving it its own name keeps
-    the OpenAPI docs and any future frontend types honest about which
-    endpoint they came from, even though today the fields match.
+    Its own model rather than a reuse of OrderOut, mirroring the earlier
+    metrics API's AnomalyEvent/MetricOut split: distinct endpoint,
+    distinct contract. `z_score` is the number the region-hour
+    order-volume detector actually computed for the hour this order fell
+    into (see detectors/zscore.py) — the point of an anomaly panel is
+    "flagged, and here's by how much", not just "flagged".
     """
 
     id: str
-    metric: str
-    value: float
-    source: str
+    order_id: str
     timestamp: datetime
-    anomaly: bool
-
-    @field_serializer("timestamp")
-    def serialize_timestamp(self, dt: datetime) -> str:
-        return _format_utc_z(dt)
-
-
-def metric_document_to_latest(document: dict) -> LatestMetric:
-    return LatestMetric(
-        id=str(document["_id"]),
-        metric=document["metric"],
-        value=document["value"],
-        source=document["source"],
-        timestamp=document["timestamp"],
-        anomaly=document.get("anomaly", False),
-    )
-
-
-class MetricStats(BaseModel):
-    """Response body for GET /metrics/stats — aggregate numbers only,
-    computed in MongoDB (see routers/analytics.py), never raw documents.
-    """
-
-    metric: str
-    minutes: int = Field(..., description="Size of the trailing window these stats cover.")
-    count: int
-    avg: float
-    min: float
-    max: float
-
-
-class AnomalyEvent(BaseModel):
-    """One entry in GET /metrics/anomalies (Phase 5).
-
-    Its own model, not a reuse of MetricOut/LatestMetric, for the same
-    reason those two are separate from each other: distinct endpoint,
-    distinct contract. This one also carries `z_score` — the number the
-    z-score detector actually computed for this event (see
-    detectors/zscore.py) — which is the whole point of an anomaly
-    panel: not just "flagged", but "flagged, and here's by how much".
-    """
-
-    id: str
-    metric: str
-    value: float
-    source: str
-    timestamp: datetime
+    product_id: str
+    product_name: str
+    region: str
+    quantity: int
+    total_value: float
     anomaly: bool
     z_score: float | None = Field(
         default=None,
-        description="The z-score that triggered this flag. None if the document predates "
-        "Phase 5 or was flagged when a verdict wasn't possible (shouldn't normally happen "
-        "for anomaly=True, but the field stays optional rather than assumed).",
+        description="The region-hour order-volume z-score that triggered this flag.",
     )
 
     @field_serializer("timestamp")
@@ -199,36 +146,124 @@ class AnomalyEvent(BaseModel):
         return _format_utc_z(dt)
 
 
-def metric_document_to_anomaly(document: dict) -> AnomalyEvent:
-    return AnomalyEvent(
+def order_document_to_anomaly(document: dict) -> BusinessAnomalyEvent:
+    return BusinessAnomalyEvent(
         id=str(document["_id"]),
-        metric=document["metric"],
-        value=document["value"],
-        source=document["source"],
+        order_id=document["order_id"],
         timestamp=document["timestamp"],
+        product_id=document["product_id"],
+        product_name=document["product_name"],
+        region=document["region"],
+        quantity=document["quantity"],
+        total_value=document["total_value"],
         anomaly=document.get("anomaly", False),
         z_score=document.get("z_score"),
     )
 
 
-class HistoryPoint(BaseModel):
-    """One entry in GET /metrics/history (Phase 6).
+# --- KPIs / aggregations -----------------------------------------------
 
-    Deliberately minimal — just what a trend chart needs to plot a
-    point — not a reuse of MetricOut/AnomalyEvent, which carry an `id`
-    and other fields no chart axis needs. This endpoint was added
-    specifically so the frontend can render real history on mount with
-    one fetch, without needing the client-side polling loop that's
-    reserved for Phase 7.
+
+class OrderKpis(BaseModel):
+    """Response body for GET /api/orders/kpis — headline numbers for the
+    dashboard's KPI card row, computed via a MongoDB aggregation
+    pipeline ($match -> $group), never Python-side.
+
+    Unlike the old /metrics/stats endpoint, an empty window returns
+    zeroed-out numbers (200) rather than 404: these four cards are meant
+    to render unconditionally at the top of the dashboard, and a 404
+    would put the whole KPI row into an error state on a cold-started
+    demo before the first order has posted. A window with genuinely no
+    orders is a legitimate (if boring) answer — "nothing happened" — not
+    a missing one.
     """
 
-    timestamp: datetime
-    value: float
+    minutes: int
+    total_orders: int
+    revenue: float
+    units_sold: int
+    avg_order_value: float
 
-    @field_serializer("timestamp")
-    def serialize_timestamp(self, dt: datetime) -> str:
+
+class RegionStats(BaseModel):
+    """One entry in GET /api/orders/regions."""
+
+    region: str
+    orders: int
+    revenue: float
+
+
+class ProductStats(BaseModel):
+    """One entry in GET /api/orders/products."""
+
+    product_id: str
+    product_name: str
+    units_sold: int
+    revenue: float
+
+
+# --- Inventory ----------------------------------------------------------
+
+
+class InventorySeedIn(BaseModel):
+    """Request body for POST /api/inventory/seed.
+
+    Used by the simulator to establish a starting stock level per
+    product+region before any orders are posted. Upserted (see
+    routers/inventory.py) so re-running the simulator's seed step is
+    idempotent rather than erroring on a duplicate.
+    """
+
+    product_id: str = Field(..., min_length=1)
+    product_name: str = Field(..., min_length=1)
+    category: str = Field(..., min_length=1)
+    region: str = Field(..., min_length=1)
+    current_stock: int = Field(..., ge=0)
+
+
+class InventoryItem(BaseModel):
+    """Response entry for GET /api/inventory — current stock state for
+    one product+region, mutated in place by every order (see
+    routers/orders.py's decrement-on-write), unlike the append-only
+    `orders` event log.
+    """
+
+    product_id: str
+    product_name: str
+    category: str
+    region: str
+    current_stock: int
+    last_updated: datetime
+
+    @field_serializer("last_updated")
+    def serialize_last_updated(self, dt: datetime) -> str:
         return _format_utc_z(dt)
 
 
-def metric_document_to_history_point(document: dict) -> HistoryPoint:
-    return HistoryPoint(timestamp=document["timestamp"], value=document["value"])
+def inventory_document_to_item(document: dict) -> InventoryItem:
+    return InventoryItem(
+        product_id=document["product_id"],
+        product_name=document["product_name"],
+        category=document["category"],
+        region=document["region"],
+        current_stock=document["current_stock"],
+        last_updated=document["last_updated"],
+    )
+
+
+RiskLevel = Literal["HIGH", "MEDIUM", "LOW"]
+
+
+class InventoryRiskItem(BaseModel):
+    """One entry in GET /api/inventory/risk — a product+region's current
+    stock against its recent order demand, classified into a risk tier
+    a dashboard badge can render directly (HIGH=red, MEDIUM=yellow,
+    LOW=green) rather than the frontend re-deriving the threshold logic.
+    """
+
+    product_id: str
+    product_name: str
+    region: str
+    current_stock: int
+    recent_demand: int
+    risk: RiskLevel
