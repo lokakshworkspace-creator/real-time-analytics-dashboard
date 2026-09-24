@@ -1,14 +1,19 @@
 import { useCallback } from 'react'
 import { getBusinessAnomalies } from '../api/client'
+import { useBrandFilter } from '../context/BrandFilterContext'
 import { POLL_INTERVAL_MS } from '../constants'
 import { useApiData } from '../hooks/useApiData'
-import { formatCurrency, formatInteger, formatRelativeTime } from '../utils/formatters'
+import { formatCurrency, formatInteger, formatRelativeTime, SEVERITY_LABEL } from '../utils/formatters'
 import { ErrorState } from './ErrorState'
 import { LoadingState } from './LoadingState'
 import { RefreshIndicator } from './RefreshIndicator'
 
 export function AnomalyPanel() {
-  const fetchFn = useCallback(() => getBusinessAnomalies(50), [])
+  const { selectedBrand } = useBrandFilter()
+  const fetchFn = useCallback(
+    () => getBusinessAnomalies({ limit: 50, brand: selectedBrand || undefined }),
+    [selectedBrand]
+  )
   const { data, loading, error, isRefreshing, pollError, lastUpdated } = useApiData(fetchFn, {
     intervalMs: POLL_INTERVAL_MS,
   })
@@ -36,9 +41,15 @@ export function AnomalyPanel() {
             <li key={event.id} className="anomaly-item">
               <div className="anomaly-item__row">
                 <span className="anomaly-item__metric">{event.region}</span>
+                {event.severity && (
+                  <span className={`severity-badge severity-badge--${event.severity}`}>
+                    {SEVERITY_LABEL[event.severity]}
+                  </span>
+                )}
                 <span className="anomaly-item__value">{formatCurrency(event.total_value)}</span>
               </div>
               <div className="anomaly-item__row anomaly-item__row--meta">
+                <span>{event.brand}</span>
                 <span>{event.product_name}</span>
                 <span>qty {formatInteger(event.quantity)}</span>
                 <span>{formatRelativeTime(event.timestamp)}</span>

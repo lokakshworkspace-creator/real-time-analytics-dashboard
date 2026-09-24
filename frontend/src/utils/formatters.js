@@ -47,3 +47,9 @@ export const RISK_LABEL = {
   MEDIUM: 'Medium',
   LOW: 'Low',
 }
+
+export const SEVERITY_LABEL = {
+  mild: 'Mild',
+  moderate: 'Moderate',
+  severe: 'Severe',
+}

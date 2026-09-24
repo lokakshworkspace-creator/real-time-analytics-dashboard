@@ -10,9 +10,75 @@
 }
 
 .dashboard__subtitle {
-  margin: 0 0 24px;
+  margin: 0;
   color: var(--text-muted);
   font-size: 0.9rem;
+}
+
+.dashboard__header-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 24px;
+}
+
+.dashboard__header-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+}
+
+.viewing-badge {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 5px 12px;
+}
+
+.logout-button {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+
+.logout-button:hover {
+  color: var(--text);
+  border-color: var(--text-muted);
+}
+
+.brand-switcher {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+}
+
+.brand-switcher select {
+  font: inherit;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 5px 8px;
+}
+
+.section-header__controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
 }
 
 /* --- Shared section header (title + refresh indicator) --- */
@@ -63,6 +129,56 @@
   line-height: 1.1;
 }
 
+.metric-card__delta {
+  display: inline-block;
+  margin-top: 6px;
+  font-size: 0.76rem;
+  font-weight: 600;
+}
+
+.metric-card__delta--up {
+  color: var(--success);
+}
+
+.metric-card__delta--down {
+  color: var(--danger);
+}
+
+.metric-card__delta--neutral {
+  color: var(--text-muted);
+  font-weight: 500;
+  font-style: italic;
+}
+
+/* --- Range toggle (7D / 30D / 1Y) --- */
+
+.range-toggle {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.range-toggle__button {
+  font: inherit;
+  font-size: 0.74rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  background: var(--surface);
+  border: none;
+  padding: 5px 10px;
+  cursor: pointer;
+}
+
+.range-toggle__button + .range-toggle__button {
+  border-left: 1px solid var(--border);
+}
+
+.range-toggle__button--active {
+  background: var(--accent);
+  color: white;
+}
+
 /* --- Lower section: chart + anomaly panel --- */
 
 .dashboard__lower {
@@ -95,6 +211,16 @@
   margin: 8px 0 0;
   font-size: 0.75rem;
   color: var(--text-muted);
+}
+
+.panel__note {
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  font-size: 0.76rem;
+  color: var(--text-muted);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
 }
 
 .chart-wrap {
@@ -179,6 +305,72 @@
 .risk-badge--low {
   background: var(--success-bg);
   color: var(--success);
+}
+
+.data-table__row--flagged {
+  background: var(--danger-bg);
+}
+
+/* --- Export CSV button --- */
+
+.export-csv {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.export-csv__button {
+  font: inherit;
+  font-size: 0.74rem;
+  font-weight: 600;
+  color: var(--accent);
+  background: transparent;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  padding: 5px 10px;
+  cursor: pointer;
+}
+
+.export-csv__button:hover {
+  background: var(--accent);
+  color: white;
+}
+
+.export-csv__button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.export-csv__error {
+  font-size: 0.72rem;
+  color: var(--danger);
+}
+
+/* --- Severity badges (anomaly panel) --- */
+
+.severity-badge {
+  display: inline-block;
+  font-size: 0.66rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 2px 7px;
+  border-radius: 999px;
+}
+
+.severity-badge--mild {
+  background: var(--warning-bg);
+  color: var(--warning);
+}
+
+.severity-badge--moderate {
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+
+.severity-badge--severe {
+  background: var(--danger);
+  color: white;
 }
 
 /* --- Anomaly list --- */
@@ -309,4 +501,126 @@
     opacity: 1;
     transform: scale(1);
   }
+}
+
+/* --- Forecast toggle (TrendChart) --- */
+
+.forecast-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  cursor: pointer;
+  user-select: none;
+}
+
+.forecast-toggle input {
+  cursor: pointer;
+}
+
+/* --- Reorder suggestion (inventory risk table) --- */
+
+.reorder-suggestion {
+  margin-top: 4px;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+
+/* --- Alert type badge (alerts center) ---
+   Sits next to the shared .severity-badge (mild/moderate/severe,
+   already styled above) to say which of the three signal sources an
+   alert came from, so severity and source read as two separate facts
+   instead of being folded into one badge's color. */
+
+.alert-type-badge {
+  display: inline-block;
+  font-size: 0.66rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 7px;
+}
+
+/* --- Login page --- */
+
+.login-page {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+
+.login-card {
+  width: 100%;
+  max-width: 360px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 28px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.login-card__title {
+  margin: 0;
+  font-size: 1.3rem;
+}
+
+.login-card__subtitle {
+  margin: -8px 0 4px;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+}
+
+.login-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+}
+
+.login-field input {
+  font: inherit;
+  font-size: 0.95rem;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 9px 10px;
+}
+
+.login-field input:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.login-submit {
+  font: inherit;
+  font-weight: 600;
+  color: white;
+  background: var(--accent);
+  border: none;
+  border-radius: 8px;
+  padding: 10px;
+  cursor: pointer;
+  margin-top: 4px;
+}
+
+.login-submit:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.login-card__note {
+  margin: 4px 0 0;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  line-height: 1.4;
 }

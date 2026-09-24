@@ -4,8 +4,18 @@ motor>=3.6,<3.7
 pydantic>=2.9,<3.0
 pydantic-settings>=2.6,<3.0
 python-dotenv>=1.0,<2.0
+email-validator>=2.2,<3.0  # pydantic's EmailStr, used by UserIn/UserOut
 
-# simulator.py only (standalone HTTP client, no other backend module needs it)
+# auth: password hashing + JWT issuance/verification (routers/auth.py,
+# security.py). bcrypt used directly, not via passlib — passlib is
+# unmaintained (last release 2020) and its own internal self-test trips
+# a ValueError against bcrypt>=4.1's stricter 72-byte enforcement,
+# confirmed directly (a 500 on the very first POST /api/auth/register
+# during manual verification, before this was caught and switched).
+bcrypt>=4.1,<5.1
+python-jose[cryptography]>=3.3,<3.4
+
+# simulator.py / seed_users.py only (standalone HTTP clients, no other backend module needs it)
 requests>=2.32,<3.0
 
 # tests/ only

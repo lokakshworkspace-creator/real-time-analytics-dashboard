@@ -16,7 +16,13 @@ import statistics
 
 import pytest
 
-from app.detectors.zscore import MIN_WINDOW_SIZE, Z_THRESHOLD, compute_zscore
+from app.detectors.zscore import (
+    MIN_WINDOW_SIZE,
+    SEVERITY_MODERATE_THRESHOLD,
+    SEVERITY_SEVERE_THRESHOLD,
+    Z_THRESHOLD,
+    compute_zscore,
+)
 
 # A believable, tight-spread baseline: 10 points hovering around 50,
 # used as the "normal history" for several tests below.
@@ -130,3 +136,72 @@ class TestExactFormula:
 
         assert result.z_score == pytest.approx(expected_z)
         assert result.is_anomaly == (abs(expected_z) > Z_THRESHOLD)
+
+
+class TestSeverityTiers:
+    """Boundaries: mild is Z_THRESHOLD < |z| < SEVERITY_MODERATE_THRESHOLD
+    (3-4), moderate is SEVERITY_MODERATE_THRESHOLD <= |z| <
+    SEVERITY_SEVERE_THRESHOLD (4-6), severe is |z| >=
+    SEVERITY_SEVERE_THRESHOLD (6+) — see detectors/zscore.py's
+    _severity_for. Each test picks a `value` algebraically
+    (mean + multiplier * stdev) against a fixed window so the resulting
+    z-score lands exactly where the test claims, rather than trusting a
+    hand-picked number to land in the right bucket.
+    """
+
+    WINDOW = [45, 50, 55, 48, 52, 49, 51, 47, 53, 50]
+
+    def _value_for_z(self, target_z: float) -> float:
+        mean = statistics.mean(self.WINDOW)
+        stdev = statistics.stdev(self.WINDOW)
+        return mean + target_z * stdev
+
+    def test_just_past_flag_threshold_is_mild(self):
+        result = compute_zscore(self.WINDOW, self._value_for_z(Z_THRESHOLD + 0.5))
+
+        assert result.is_anomaly is True
+        assert result.severity == "mild"
+
+    def test_just_below_moderate_threshold_is_still_mild(self):
+        result = compute_zscore(self.WINDOW, self._value_for_z(SEVERITY_MODERATE_THRESHOLD - 0.01))
+
+        assert result.severity == "mild"
+
+    def test_exactly_at_moderate_threshold_is_moderate(self):
+        # Inclusive lower edge — see _severity_for's docstring.
+        result = compute_zscore(self.WINDOW, self._value_for_z(SEVERITY_MODERATE_THRESHOLD))
+
+        assert result.severity == "moderate"
+
+    def test_just_below_severe_threshold_is_still_moderate(self):
+        result = compute_zscore(self.WINDOW, self._value_for_z(SEVERITY_SEVERE_THRESHOLD - 0.01))
+
+        assert result.severity == "moderate"
+
+    def test_exactly_at_severe_threshold_is_severe(self):
+        result = compute_zscore(self.WINDOW, self._value_for_z(SEVERITY_SEVERE_THRESHOLD))
+
+        assert result.severity == "severe"
+
+    def test_far_past_severe_threshold_is_still_severe(self):
+        result = compute_zscore(self.WINDOW, self._value_for_z(SEVERITY_SEVERE_THRESHOLD + 20))
+
+        assert result.severity == "severe"
+
+    def test_negative_z_uses_absolute_value_for_severity(self):
+        # A collapse (negative z) is scored by magnitude, not sign —
+        # same principle TestExtremeValues already covers for is_anomaly.
+        result = compute_zscore(self.WINDOW, self._value_for_z(-(SEVERITY_SEVERE_THRESHOLD + 1)))
+
+        assert result.severity == "severe"
+
+    def test_severity_is_none_when_not_anomalous(self):
+        result = compute_zscore(self.WINDOW, self._value_for_z(1.0))  # well under Z_THRESHOLD
+
+        assert result.is_anomaly is False
+        assert result.severity is None
+
+    def test_severity_is_none_on_cold_start(self):
+        result = compute_zscore([10, 20, 30], 999_999)  # below MIN_WINDOW_SIZE
+
+        assert result.severity is None

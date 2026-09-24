@@ -26,6 +26,13 @@ from .config import settings
 #     recent-demand aggregation ({product_id, region} equality + a
 #     timestamp range) and is a superset of the plain
 #     {product_id, region} shape the inventory decrement lookup uses.
+#   - brand_1_timestamp_-1: backs every business-account-scoped query
+#     (role="business" adds a {brand: {$in: owned_brands}} match — see
+#     security.py/routers/orders.py) plus the trend/KPI endpoints' own
+#     time-window $match, which is exactly {brand, timestamp range} once
+#     brand-scoping is applied — same shape as region_1_timestamp_-1
+#     above, for the same reason (brand equality/membership + a bounded
+#     timestamp range, run on a large fraction of reads once auth ships).
 # Indexes on the `inventory` collection (a mutable current-state doc per
 # product+region, not an event log):
 #   - product_id_1_region_1 (unique): one document per product+region.
@@ -33,6 +40,9 @@ from .config import settings
 #     inventory-risk lookup. Unique so a seed re-run or a race between
 #     two orders for the same product+region can never fork into two
 #     stock records that silently disagree with each other.
+# Indexes on the `users` collection:
+#   - email_1 (unique): one account per email address. Backs the
+#     register endpoint's duplicate check and every login lookup.
 # Explicit names (rather than letting PyMongo auto-name them) make
 # re-running create_index() on every startup predictable: the same name
 # always maps to the same key spec.
@@ -44,10 +54,15 @@ ORDERS_INDEXES: list[tuple[list[tuple[str, int]], str, dict]] = [
         "product_id_1_region_1_timestamp_-1",
         {},
     ),
+    ([("brand", 1), ("timestamp", -1)], "brand_1_timestamp_-1", {}),
 ]
 
 INVENTORY_INDEXES: list[tuple[list[tuple[str, int]], str, dict]] = [
     ([("product_id", 1), ("region", 1)], "product_id_1_region_1", {"unique": True}),
+]
+
+USERS_INDEXES: list[tuple[list[tuple[str, int]], str, dict]] = [
+    ([("email", 1)], "email_1", {"unique": True}),
 ]
 
 
@@ -70,8 +85,8 @@ async def close_mongo_connection() -> None:
 
 
 async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
-    """Creates the `orders` and `inventory` indexes, safe to call on
-    every startup.
+    """Creates the `orders`, `inventory`, and `users` indexes, safe to
+    call on every startup.
 
     create_index() is already idempotent in the normal case — MongoDB
     no-ops if an index with the same name *and* the same key spec/
@@ -95,6 +110,12 @@ async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
             await db.inventory.create_index(keys, name=name, **options)
         except OperationFailure as exc:
             print(f"WARNING: could not create index '{name}' on inventory: {exc}")
+
+    for keys, name, options in USERS_INDEXES:
+        try:
+            await db.users.create_index(keys, name=name, **options)
+        except OperationFailure as exc:
+            print(f"WARNING: could not create index '{name}' on users: {exc}")
 
 
 def get_database() -> AsyncIOMotorDatabase:

@@ -1,14 +1,16 @@
-// One KPI card: a label and a pre-formatted value. Deliberately generic
-// (no metric-name lookup, no per-card anomaly/source/timestamp meta) —
-// unlike the old system-metrics dashboard, these four cards all come
-// from a single GET /api/orders/kpis response, not one document per
-// card, so there's no per-card "is this stale" or "is this anomalous"
-// state to show.
-export function MetricCard({ label, value }) {
+import { DeltaBadge } from './DeltaBadge'
+
+// One KPI card: a label, a pre-formatted value, and an optional
+// period-over-period delta. `delta` is a plain percentage number
+// (already computed server-side — see OrderKpis.change_pct), null when
+// the previous period had nothing to compare against, or omitted
+// entirely for a card that doesn't have period comparison at all.
+export function MetricCard({ label, value, delta }) {
   return (
     <div className="metric-card">
       <div className="metric-card__label">{label}</div>
       <div className="metric-card__value">{value}</div>
+      <DeltaBadge delta={delta} />
     </div>
   )
 }

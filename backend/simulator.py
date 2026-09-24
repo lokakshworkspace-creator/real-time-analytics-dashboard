@@ -44,15 +44,22 @@ class Product:
     product_id: str
     product_name: str
     category: str
+    brand: str
     unit_price: float
 
 
+# Brand-prefixed product names (added alongside role-based auth): each
+# product now belongs to a real, recognizable brand so business
+# accounts have something meaningful to be scoped to — see
+# routers/auth.py and security.brand_match_stage. One brand per
+# product, chosen to plausibly fit that product's category rather than
+# assigned arbitrarily.
 PRODUCTS = [
-    Product("sku-001", "Wireless Earbuds", "Electronics", 59.99),
-    Product("sku-002", "Running Shoes", "Apparel", 89.99),
-    Product("sku-003", "Stainless Water Bottle", "Home & Kitchen", 24.99),
-    Product("sku-004", "Mechanical Keyboard", "Electronics", 119.99),
-    Product("sku-005", "Yoga Mat", "Sporting Goods", 34.99),
+    Product("sku-001", "Nike Running Shoes", "Apparel", "Nike", 89.99),
+    Product("sku-002", "Sony Wireless Earbuds", "Electronics", "Sony", 59.99),
+    Product("sku-003", "Hydro Flask Water Bottle", "Home & Kitchen", "Hydro Flask", 24.99),
+    Product("sku-004", "Logitech Mechanical Keyboard", "Electronics", "Logitech", 119.99),
+    Product("sku-005", "Lululemon Yoga Mat", "Sporting Goods", "Lululemon", 34.99),
 ]
 
 # Relative likelihood of an order being for each product - uneven for
@@ -82,6 +89,7 @@ def seed_inventory(session: requests.Session, base_url: str) -> None:
                 "product_id": product.product_id,
                 "product_name": product.product_name,
                 "category": product.category,
+                "brand": product.brand,
                 "region": region,
                 # Small spread around STARTING_STOCK so regions don't
                 # all start perfectly identical.
@@ -107,6 +115,7 @@ def generate_order(spike: bool) -> dict:
         "product_id": product.product_id,
         "product_name": product.product_name,
         "category": product.category,
+        "brand": product.brand,
         "quantity": quantity,
         "unit_price": product.unit_price,
         "region": region,

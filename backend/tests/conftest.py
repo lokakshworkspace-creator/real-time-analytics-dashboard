@@ -72,3 +72,60 @@ def api_client(test_db):
     with TestClient(app) as client:
         yield client
     app.dependency_overrides.clear()
+
+
+@pytest.fixture
+def admin_headers(api_client):
+    """Registers (via the bootstrap path — `test_db` is always empty at
+    this point) and logs in an admin, returning ready-to-use
+    Authorization headers.
+
+    Goes through the real /api/auth/register + /api/auth/login
+    endpoints rather than inserting a user document directly — the
+    point of an integration suite is exercising the same path a real
+    client hits, including password hashing and JWT issuance, not just
+    getting a token into a test as cheaply as possible.
+    """
+    api_client.post(
+        "/api/auth/register",
+        json={"email": "admin@test.example.com", "password": "admin-test-password", "role": "admin"},
+    )
+    login = api_client.post(
+        "/api/auth/login",
+        json={"email": "admin@test.example.com", "password": "admin-test-password"},
+    )
+    token = login.json()["access_token"]
+    return {"Authorization": f"Bearer {token}"}
+
+
+@pytest.fixture
+def business_headers_factory(api_client, admin_headers):
+    """Returns a factory: business_headers_factory(email, brands) ->
+    Authorization headers for a fresh business account admin-registers
+    on the spot, scoped to `brands` (a list — e.g. ["Nike"]).
+
+    A factory, not a single fixed business fixture, because brand-
+    scoping tests need more than one business account (at minimum, one
+    to prove *does* see its own brand and one to prove *doesn't* see
+    another's) with different owned_brands per test.
+    """
+
+    def _make(email: str, brands: list[str]) -> dict:
+        api_client.post(
+            "/api/auth/register",
+            headers=admin_headers,
+            json={
+                "email": email,
+                "password": "business-test-password",
+                "role": "business",
+                "business_name": brands[0],
+                "owned_brands": brands,
+            },
+        )
+        login = api_client.post(
+            "/api/auth/login", json={"email": email, "password": "business-test-password"}
+        )
+        token = login.json()["access_token"]
+        return {"Authorization": f"Bearer {token}"}
+
+    return _make

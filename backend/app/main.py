@@ -16,7 +16,7 @@ from pymongo.errors import PyMongoError
 
 from .config import settings
 from .database import close_mongo_connection, connect_to_mongo, ensure_indexes, get_database
-from .routers import inventory, orders
+from .routers import alerts, auth, inventory, orders
 
 
 @asynccontextmanager
@@ -43,8 +43,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(auth.router)
 app.include_router(orders.router)
 app.include_router(inventory.router)
+app.include_router(alerts.router)
 
 
 # Phase 8 hardening: MongoDB going briefly unreachable mid-request (a

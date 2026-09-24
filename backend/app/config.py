@@ -29,6 +29,18 @@ class Settings(BaseSettings):
     # CORS setup and README's Phase 9 design notes.
     frontend_origin: str = "http://localhost:5173"
 
+    # Auth (role-based access control). The default below is INSECURE —
+    # a fixed, publicly-known string — and exists only so the backend
+    # still runs with zero configuration for local dev (same promise as
+    # every other setting here). Any deployment beyond a developer's own
+    # machine MUST set JWT_SECRET_KEY in the environment to something
+    # random (e.g. `python -c "import secrets; print(secrets.token_hex(32))"`),
+    # or every JWT this app issues is forgeable by anyone who's read this
+    # source file.
+    jwt_secret_key: str = "INSECURE-DEV-ONLY-SECRET-CHANGE-ME-IN-PRODUCTION"
+    jwt_algorithm: str = "HS256"
+    jwt_expiry_hours: int = 24
+
     model_config = SettingsConfigDict(
         env_file=str(ENV_PATH),
         env_file_encoding="utf-8",

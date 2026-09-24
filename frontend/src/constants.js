@@ -6,10 +6,9 @@
 // repeated in each one.
 export const POLL_INTERVAL_MS = 5000
 
-// Trailing window (minutes) most KPI/regional/product endpoints use by
-// default — one named constant so every section that reads "the last
-// hour" agrees on what that means without repeating the literal 60.
-export const DEFAULT_WINDOW_MINUTES = 60
+// Default trailing period for KPIs/regions/products/trend — matches
+// the backend's own default (routers/orders.py's range Query default).
+export const DEFAULT_RANGE = '7d'
 
 // Inventory risk looks back further than the KPI/regional windows above
 // on purpose: "recent demand" for a restocking decision is a

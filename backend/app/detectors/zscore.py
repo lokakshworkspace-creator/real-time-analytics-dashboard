@@ -23,8 +23,38 @@ from __future__ import annotations
 import statistics
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from typing import Literal
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
+
+Severity = Literal["mild", "moderate", "severe"]
+
+# Boundaries expressed as multiples of Z_THRESHOLD (3.0) rather than
+# independent magic numbers — mild is "just past the flag threshold"
+# (3-4sigma: barely enough to flag, most false-positive-prone tier),
+# moderate is "clearly anomalous by any reasonable reading" (4-6sigma),
+# severe is "the kind of deviation that's virtually never noise" (6sigma+,
+# 2x the base threshold). Boundaries are inclusive on the lower edge —
+# exactly 4.0 is "moderate", not "mild" — so every |z| above the flag
+# threshold maps to exactly one tier with no gap or overlap.
+SEVERITY_MODERATE_THRESHOLD = 4.0
+SEVERITY_SEVERE_THRESHOLD = 6.0
+
+
+def _severity_for(z_score: float) -> Severity:
+    """Classifies an already-flagged z-score (|z| > Z_THRESHOLD) into a
+    severity tier. Callers must only call this once compute_zscore has
+    confirmed a verdict was possible and the threshold was breached —
+    it doesn't re-check either condition itself, since its only caller
+    (compute_zscore) already has and there's no reason to duplicate
+    that guard here.
+    """
+    abs_z = abs(z_score)
+    if abs_z >= SEVERITY_SEVERE_THRESHOLD:
+        return "severe"
+    if abs_z >= SEVERITY_MODERATE_THRESHOLD:
+        return "moderate"
+    return "mild"
 
 # How many trailing hourly buckets form the rolling baseline for a
 # region's order volume. Bounded to a day so the baseline reflects
@@ -56,6 +86,7 @@ class ZScoreResult:
     is_anomaly: bool
     z_score: float | None  # None = no verdict was possible (cold start, or a constant window)
     window_size: int  # how many prior points the verdict (or non-verdict) is based on
+    severity: Severity | None = None  # None unless is_anomaly is True
 
 
 def compute_zscore(window: list[float], value: float) -> ZScoreResult:
@@ -81,7 +112,13 @@ def compute_zscore(window: list[float], value: float) -> ZScoreResult:
         return ZScoreResult(is_anomaly=False, z_score=None, window_size=len(window))
 
     z = (value - mean) / stdev
-    return ZScoreResult(is_anomaly=abs(z) > Z_THRESHOLD, z_score=z, window_size=len(window))
+    is_anomaly = abs(z) > Z_THRESHOLD
+    return ZScoreResult(
+        is_anomaly=is_anomaly,
+        z_score=z,
+        window_size=len(window),
+        severity=_severity_for(z) if is_anomaly else None,
+    )
 
 
 def _hour_start(timestamp: datetime) -> datetime:
@@ -137,8 +174,22 @@ async def score_order_volume(
         available_hours = 0
     else:
         earliest_hour = _hour_start(earliest_order["timestamp"])
-        available_hours = min(
-            WINDOW_HOURS, int((hour_start - earliest_hour).total_seconds() // 3600)
+        # Floored at 0 — a real bug, found and fixed while backdating
+        # test orders (not hypothetical): the "earliest" order for a
+        # region is only actually the earliest if every order for that
+        # region arrives in roughly chronological order, which holds
+        # for the simulator's real-time posting but not for a
+        # backdated/historical order whose timestamp is *older* than
+        # the earliest one already stored. In that case
+        # (hour_start - earliest_hour) goes negative, and passing a
+        # negative length to Motor's to_list() raised
+        # "ValueError: length must be non-negative", a 500 on every
+        # such POST /api/orders. A backdated order's own region-hour
+        # bucket genuinely has no real prior history relative to itself
+        # (nothing in the stored data precedes it), so 0 available
+        # hours — cold start — is the correct answer, not a crash.
+        available_hours = max(
+            0, min(WINDOW_HOURS, int((hour_start - earliest_hour).total_seconds() // 3600))
         )
 
     window_start = hour_start - timedelta(hours=available_hours)
