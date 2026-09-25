@@ -17,9 +17,55 @@ from motor.motor_asyncio import AsyncIOMotorClient
 
 from app.config import settings
 from app.database import get_database
+from app.llm import Explanation, GeminiExplainer, get_explainer
 from app.main import app
 
 TEST_DB_NAME = f"{settings.mongodb_db_name}_test"
+
+
+@pytest.fixture(autouse=True)
+def _never_call_real_gemini(monkeypatch):
+    """The test suite must never reach the real Gemini API — it would
+    spend the dev key's free-tier quota and make results depend on the
+    network. Every route test overrides `get_explainer` with a fake; this
+    is the backstop for a test that forgets to: building the real SDK
+    client (the only path to the network) raises instead. Tests of
+    GeminiExplainer itself inject a fake SDK client by assigning
+    `explainer._get_client` on the *instance*, which takes precedence
+    over this class-level patch.
+    """
+
+    def _blocked(self):
+        raise AssertionError("A test tried to build a real Gemini client — use a fake explainer.")
+
+    monkeypatch.setattr(GeminiExplainer, "_get_client", _blocked)
+
+
+class FakeExplainer:
+    """Stands in for llm.GeminiExplainer: records every call, and can be
+    told to raise, so tests assert exactly how many model calls a request
+    sequence makes and how routes react to provider failures.
+    """
+
+    def __init__(self):
+        self.calls: list[dict] = []
+        self.error: Exception | None = None
+
+    async def explain(self, context: dict) -> Explanation:
+        self.calls.append(context)
+        if self.error is not None:
+            raise self.error
+        return Explanation(
+            text="Order volume in this region jumped far above its recent baseline.",
+            suggested_action="Check whether a promotion or a bot is driving the spike.",
+        )
+
+
+@pytest.fixture
+def fake_explainer(api_client):
+    fake = FakeExplainer()
+    app.dependency_overrides[get_explainer] = lambda: fake
+    return fake
 
 
 @pytest.fixture

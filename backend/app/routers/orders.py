@@ -25,6 +25,7 @@ from pymongo import ReturnDocument
 from ..csv_export import csv_streaming_response
 from ..database import get_database
 from ..detectors import zscore
+from ..detectors.forecast_deviation import fit_linear_trend
 from ..models import (
     BrandBenchmark,
     BrandBenchmarkResponse,
@@ -594,24 +595,6 @@ def _day_start(dt: datetime) -> datetime:
     return dt.replace(hour=0, minute=0, second=0, microsecond=0)
 
 
-def _fit_linear_trend(y_values: list[float]) -> tuple[float, float]:
-    """Ordinary least-squares fit of y = intercept + slope * x, with
-    x = 0, 1, 2, ... over the given values in order. Pure Python (sums
-    and a division), not a new dependency — "a basic linear regression
-    over the recent daily buckets," per the brief, not anything that
-    needs numpy/scikit-learn for a fit this simple.
-    """
-    n = len(y_values)
-    x_values = range(n)
-    x_mean = sum(x_values) / n
-    y_mean = sum(y_values) / n
-    numerator = sum((x - x_mean) * (y - y_mean) for x, y in zip(x_values, y_values))
-    denominator = sum((x - x_mean) ** 2 for x in x_values)
-    slope = numerator / denominator if denominator != 0 else 0.0
-    intercept = y_mean - slope * x_mean
-    return intercept, slope
-
-
 @router.get("/orders/forecast", response_model=ForecastResponse)
 async def get_order_forecast(
     product_id: str = Query(..., min_length=1),
@@ -622,8 +605,9 @@ async def get_order_forecast(
     """Projects `product_id`'s daily orders/revenue for the next
     `horizon` days from its last FORECAST_HISTORY_DAYS of real daily
     order counts, via ordinary least-squares linear regression (see
-    _fit_linear_trend) — deliberately simple and explainable, not a
-    black box. `method` on the response names exactly what ran, so a
+    detectors/forecast_deviation.py's fit_linear_trend, shared with the
+    forecast-deviation anomaly detector) — deliberately simple and
+    explainable, not a black box. `method` on the response names exactly what ran, so a
     consumer never mistakes this for something more sophisticated.
 
     Brand-scoped the same way as every other endpoint
@@ -698,8 +682,8 @@ async def get_order_forecast(
             for i in range(horizon)
         ]
     else:
-        orders_intercept, orders_slope = _fit_linear_trend(daily_orders)
-        revenue_intercept, revenue_slope = _fit_linear_trend(daily_revenue)
+        orders_intercept, orders_slope = fit_linear_trend(daily_orders)
+        revenue_intercept, revenue_slope = fit_linear_trend(daily_revenue)
         method = f"linear_regression_last_{FORECAST_HISTORY_DAYS}_days"
 
         forecast = []
@@ -793,14 +777,23 @@ async def get_business_anomalies(
     current_user: UserOut = Depends(get_current_user),
     db: AsyncIOMotorDatabase = Depends(get_database),
 ) -> list[BusinessAnomalyEvent]:
-    """Flagged orders, newest first — the region-hour order-volume
-    detector's own record of what it flagged and why (the `z_score`/
-    `severity` fields are what actually triggered it, and how bad it
-    was — see detectors/zscore.py). {anomaly: True} + sort by timestamp
-    is exactly what the `anomaly_1_timestamp_-1` index (see database.py)
-    is built for.
+    """Orders flagged by ANY of the three detectors, newest first, each
+    carrying all three verdicts and a `detector_agreement` count (see
+    models.BusinessAnomalyEvent). z-score flags are set at ingest
+    (detectors/zscore.py); Isolation Forest and forecast-deviation flags
+    are stamped by the batch pass (detectors/batch.py) — so an order
+    flagged only by the z-score is listed straight away, and one the
+    batch flags appears once a run has covered its hour.
+
+    The $or is backed by one index per branch (anomaly_1_timestamp_-1,
+    is_anomaly_if_1_timestamp_-1, is_anomaly_forecast_1_timestamp_-1 —
+    see database.py); MongoDB runs each branch off its own index and
+    merges, rather than falling back to a collection scan.
     """
-    query_filter: dict = {"anomaly": True, **(brand_match_stage(current_user, brand) or {})}
+    query_filter: dict = {
+        "$or": [{"anomaly": True}, {"is_anomaly_if": True}, {"is_anomaly_forecast": True}],
+        **(brand_match_stage(current_user, brand) or {}),
+    }
     cursor = db.orders.find(query_filter).sort("timestamp", -1).limit(limit)
     documents = [doc async for doc in cursor]
     return [order_document_to_anomaly(doc) for doc in documents]

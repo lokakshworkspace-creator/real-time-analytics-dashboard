@@ -22,6 +22,12 @@ from .config import settings
 #   - anomaly_1_timestamp_-1: backs GET /api/anomalies/business —
 #     equality on anomaly=True, sorted by timestamp, same shape as the
 #     old metrics anomaly index.
+#   - is_anomaly_if_1_timestamp_-1 / is_anomaly_forecast_1_timestamp_-1:
+#     same shape as anomaly_1_timestamp_-1, for the two batch detectors
+#     (detectors/batch.py). GET /api/anomalies/business now matches an
+#     order if ANY of the three detectors flagged it — an $or, and
+#     MongoDB only uses an index for an $or when every branch has one,
+#     so each detector's flag needs its own.
 #   - product_id_1_region_1_timestamp_-1: backs GET /api/inventory/risk's
 #     recent-demand aggregation ({product_id, region} equality + a
 #     timestamp range) and is a superset of the plain
@@ -49,6 +55,8 @@ from .config import settings
 ORDERS_INDEXES: list[tuple[list[tuple[str, int]], str, dict]] = [
     ([("region", 1), ("timestamp", -1)], "region_1_timestamp_-1", {}),
     ([("anomaly", 1), ("timestamp", -1)], "anomaly_1_timestamp_-1", {}),
+    ([("is_anomaly_if", 1), ("timestamp", -1)], "is_anomaly_if_1_timestamp_-1", {}),
+    ([("is_anomaly_forecast", 1), ("timestamp", -1)], "is_anomaly_forecast_1_timestamp_-1", {}),
     (
         [("product_id", 1), ("region", 1), ("timestamp", -1)],
         "product_id_1_region_1_timestamp_-1",

@@ -200,3 +200,96 @@ class TestAlertsBrandScoping:
 
         brands_seen = {a["related_entity"].get("brand") for a in response.json() if a["type"] == "low_stock"}
         assert brands_seen == {"Nike"}
+
+
+class TestAlertsBrandFilter:
+    """The admin's `?brand=` narrows EVERY alert source (anomalies, low
+    stock, regional and product declines), not just some of them; a
+    business account's `?brand=` is ignored — it stays on its own brands.
+    """
+
+    def _seed_two_brands(self, client):
+        now = datetime.now(timezone.utc)
+        reference_hour = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+        for brand, region in (("Nike", "Nike Region"), ("Adidas", "Adidas Region")):
+            # 1) HIGH-risk stock
+            seed_inventory(client, product_id=f"sku-{brand}-low", brand=brand, region=region, current_stock=5)
+            post_order(client, product_id=f"sku-{brand}-low", brand=brand, region=region, quantity=10)
+            # 2) a declining product (-80% vs the previous 7d)
+            for _ in range(10):
+                post_order(client, product_id=f"sku-{brand}-decl", product_name=f"{brand} Decliner",
+                           brand=brand, region=f"{region} D", timestamp=now - timedelta(days=10))
+            for _ in range(2):
+                post_order(client, product_id=f"sku-{brand}-decl", product_name=f"{brand} Decliner",
+                           brand=brand, region=f"{region} D", timestamp=now - timedelta(days=1))
+            # 3) a z-score anomaly (10 quiet hours, then a flood)
+            for hours_ago, count in zip(range(10, 0, -1), [3, 4] * 5):
+                for _ in range(count):
+                    post_order(client, brand=brand, region=f"{region} A",
+                               timestamp=reference_hour - timedelta(hours=hours_ago))
+            for _ in range(20):
+                post_order(client, brand=brand, region=f"{region} A", timestamp=reference_hour)
+
+    @staticmethod
+    def _brands_by_type(alerts):
+        """{alert type: set of brands it mentions}, read from each type's own identifying fields."""
+        seen = {"low_stock": set(), "anomaly": set(), "decline": set()}
+        for a in alerts:
+            entity = a["related_entity"]
+            if a["type"] == "decline":
+                pid = entity.get("product_id")
+                if pid:
+                    seen["decline"].add(pid.split("-")[1])  # sku-<Brand>-decl
+                else:
+                    seen["decline"].add(entity["region"].split()[0])  # "<Brand> Region D"
+            else:
+                seen[a["type"]].add(entity["brand"])
+        return seen
+
+    def test_admin_with_no_filter_sees_every_brand_in_every_source(self, api_client, admin_headers):
+        self._seed_two_brands(api_client)
+
+        seen = self._brands_by_type(api_client.get("/api/alerts", headers=admin_headers).json())
+
+        assert seen["low_stock"] == {"Nike", "Adidas"}
+        assert seen["anomaly"] == {"Nike", "Adidas"}
+        assert seen["decline"] == {"Nike", "Adidas"}
+
+    def test_admin_brand_filter_narrows_all_four_sources(self, api_client, admin_headers):
+        self._seed_two_brands(api_client)
+
+        response = api_client.get("/api/alerts", params={"brand": "Nike"}, headers=admin_headers)
+
+        assert response.status_code == 200
+        seen = self._brands_by_type(response.json())
+        assert seen["low_stock"] == {"Nike"}
+        assert seen["anomaly"] == {"Nike"}
+        assert seen["decline"] == {"Nike"}  # product AND regional declines
+
+    def test_admin_filter_for_a_brand_with_no_data_is_empty(self, api_client, admin_headers):
+        self._seed_two_brands(api_client)
+
+        response = api_client.get("/api/alerts", params={"brand": "Puma"}, headers=admin_headers)
+
+        assert response.status_code == 200
+        assert response.json() == []
+
+    def test_business_account_cannot_widen_its_scope_with_brand(
+        self, api_client, admin_headers, business_headers_factory
+    ):
+        self._seed_two_brands(api_client)
+        nike_headers = business_headers_factory("nike-alert-param@test.example.com", ["Nike"])
+
+        without = api_client.get("/api/alerts", headers=nike_headers).json()
+        other_brand = api_client.get("/api/alerts", params={"brand": "Adidas"}, headers=nike_headers).json()
+
+        # The param changed nothing. Compared without `timestamp`: low-stock
+        # and decline alerts are stamped "now" per request, so two calls
+        # can never match to the microsecond (that, not scope, was the only
+        # difference between the two responses).
+        strip = lambda alerts: [{k: v for k, v in a.items() if k != "timestamp"} for a in alerts]
+        assert strip(other_brand) == strip(without)
+        seen = self._brands_by_type(other_brand)
+        assert seen["low_stock"] == {"Nike"}
+        assert seen["anomaly"] == {"Nike"}
+        assert seen["decline"] == {"Nike"}

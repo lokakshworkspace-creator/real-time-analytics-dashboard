@@ -1043,9 +1043,18 @@ class TestBusinessAnomalies:
         anomalies = api_client.get("/api/anomalies/business", headers=admin_headers).json()
         assert len(anomalies) >= 1
         assert all(event["region"] == "Anomaly Test Region" for event in anomalies)
-        assert all(abs(event["z_score"]) > 3 for event in anomalies)
-        assert all(event["severity"] in ("mild", "moderate", "severe") for event in anomalies)
+        assert all(event["z_score"]["flagged"] for event in anomalies)
+        assert all(abs(event["z_score"]["score"]) > 3 for event in anomalies)
+        assert all(
+            event["z_score"]["severity"] in ("mild", "moderate", "severe") for event in anomalies
+        )
         assert all(event["brand"] == "Nike" for event in anomalies)
+        # No batch run has happened in this test, so only the z-score
+        # (which runs at ingest) has a verdict: the batch detectors are
+        # null (not "false" — they haven't scored it), and agreement is 1.
+        assert all(event["isolation_forest"] is None for event in anomalies)
+        assert all(event["forecast"] is None for event in anomalies)
+        assert all(event["detector_agreement"] == 1 for event in anomalies)
 
     def test_steady_order_volume_never_flagged(self, api_client, admin_headers):
         for hours_ago in range(11, -1, -1):  # 11 prior hours + the current one

@@ -16,7 +16,7 @@ from pymongo.errors import PyMongoError
 
 from .config import settings
 from .database import close_mongo_connection, connect_to_mongo, ensure_indexes, get_database
-from .routers import alerts, auth, inventory, orders
+from .routers import alerts, auth, detectors, explain, inventory, orders
 
 
 @asynccontextmanager
@@ -47,6 +47,8 @@ app.include_router(auth.router)
 app.include_router(orders.router)
 app.include_router(inventory.router)
 app.include_router(alerts.router)
+app.include_router(detectors.router)
+app.include_router(explain.router)
 
 
 # Phase 8 hardening: MongoDB going briefly unreachable mid-request (a
@@ -95,9 +97,20 @@ def _sanitize_for_json(value):
 # response without changing what MetricIn accepts or rejects.
 @app.exception_handler(RequestValidationError)
 async def handle_validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
+    errors = exc.errors()
+    # FastAPI's default 422 body echoes each rejected value back in
+    # `input` — for the whole request body when a cross-field validator
+    # fails. On /api/auth/* that body is a password (registration, login,
+    # change-password: e.g. "new password must differ from the current
+    # one" echoed BOTH passwords straight back). Response bodies end up in
+    # client logs, proxies and error reporters, so on the auth routes the
+    # echo is dropped: the client still gets which field failed and why
+    # (`loc`, `msg`, `type`), just not what they typed.
+    if request.url.path.startswith("/api/auth/"):
+        errors = [{key: value for key, value in error.items() if key != "input"} for error in errors]
     return JSONResponse(
         status_code=422,
-        content=_sanitize_for_json(jsonable_encoder({"detail": exc.errors()})),
+        content=_sanitize_for_json(jsonable_encoder({"detail": errors})),
     )
 
 

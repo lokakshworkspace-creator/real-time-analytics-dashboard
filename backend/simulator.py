@@ -54,19 +54,31 @@ class Product:
 # routers/auth.py and security.brand_match_stage. One brand per
 # product, chosen to plausibly fit that product's category rather than
 # assigned arbitrarily.
+#
+# Nike has four products (shoes, a t-shirt, a duffel bag, a cap) rather
+# than one, so a Nike business account sees a real multi-product catalog:
+# a product-performance table with something to rank, and regional demand
+# that differs by product. The other brands stay single-product. The
+# three newer Nike SKUs are appended after the original five so the
+# original sku-001..005 ids never change.
 PRODUCTS = [
     Product("sku-001", "Nike Running Shoes", "Apparel", "Nike", 89.99),
     Product("sku-002", "Sony Wireless Earbuds", "Electronics", "Sony", 59.99),
     Product("sku-003", "Hydro Flask Water Bottle", "Home & Kitchen", "Hydro Flask", 24.99),
     Product("sku-004", "Logitech Mechanical Keyboard", "Electronics", "Logitech", 119.99),
     Product("sku-005", "Lululemon Yoga Mat", "Sporting Goods", "Lululemon", 34.99),
+    Product("sku-006", "Nike Dri-FIT T-Shirt", "Apparel", "Nike", 34.99),
+    Product("sku-007", "Nike Duffel Bag", "Accessories", "Nike", 64.99),
+    Product("sku-008", "Nike Heritage Cap", "Accessories", "Nike", 24.99),
 ]
 
 # Relative likelihood of an order being for each product - uneven for
 # the same reason as REGION_WEIGHTS: some products should visibly
 # outsell others in the product-performance table. Same length/order as
-# PRODUCTS.
-PRODUCT_WEIGHTS = [0.40, 0.25, 0.15, 0.12, 0.08]
+# PRODUCTS. Sums to 1.0; Nike's four products together are ~43% (they
+# were 40% when Nike was a single product, so overall brand mix is
+# roughly unchanged), split shoes > t-shirt > bag > cap.
+PRODUCT_WEIGHTS = [0.22, 0.20, 0.14, 0.12, 0.11, 0.10, 0.06, 0.05]
 
 STARTING_STOCK = 300
 

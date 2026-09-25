@@ -1,5 +1,5 @@
 """Auth endpoints: POST /api/auth/register, POST /api/auth/login,
-GET /api/auth/me.
+GET /api/auth/me, PATCH /api/auth/me, POST /api/auth/change-password.
 
 Registration has a one-time bootstrap: while the `users` collection is
 empty, POST /api/auth/register succeeds without a token and always
@@ -13,12 +13,22 @@ role.
 
 from datetime import datetime, timezone
 
+from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException, status
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pymongo.errors import DuplicateKeyError
 
 from ..database import get_database
-from ..models import LoginIn, TokenOut, UserIn, UserOut, user_document_to_out
+from ..models import (
+    LoginIn,
+    MessageOut,
+    PasswordChangeIn,
+    ProfileUpdateIn,
+    TokenOut,
+    UserIn,
+    UserOut,
+    user_document_to_out,
+)
 from ..security import (
     create_access_token,
     get_current_user,
@@ -111,3 +121,75 @@ async def login(payload: LoginIn, db: AsyncIOMotorDatabase = Depends(get_databas
 @router.get("/me", response_model=UserOut)
 async def get_me(current_user: UserOut = Depends(get_current_user)) -> UserOut:
     return current_user
+
+
+@router.patch("/me", response_model=UserOut)
+async def update_me(
+    payload: ProfileUpdateIn,
+    db: AsyncIOMotorDatabase = Depends(get_database),
+    current_user: UserOut = Depends(get_current_user),
+) -> UserOut:
+    """Self-service profile edit. Today that means exactly one thing: a
+    business account renaming itself (`business_name`).
+
+    An admin has no business name — the field is null by design (see
+    `register`) — so there is nothing for them to edit, and this is a 403
+    (their role isn't allowed the operation), not a silent no-op.
+    Everything else — role, owned_brands, email — is rejected before this
+    body is ever handled: ProfileUpdateIn forbids extra fields, so a
+    request naming them gets a 422 and changes nothing (not even a
+    business_name sent alongside them: the whole request is refused).
+    Brand ownership in particular is deliberately not self-editable: it
+    is what every scoped query in this app keys on (security.py's
+    brand_match_stage), so letting an account widen it would defeat the
+    whole role model.
+    """
+    if current_user.role != "business":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Administrator accounts have no business name to edit",
+        )
+
+    await db.users.update_one(
+        {"_id": ObjectId(current_user.user_id)},
+        {"$set": {"business_name": payload.business_name}},
+    )
+    updated = await db.users.find_one({"_id": ObjectId(current_user.user_id)})
+    return user_document_to_out(updated)
+
+
+@router.post("/change-password", response_model=MessageOut)
+async def change_password(
+    payload: PasswordChangeIn,
+    db: AsyncIOMotorDatabase = Depends(get_database),
+    current_user: UserOut = Depends(get_current_user),
+) -> MessageOut:
+    """Changes the caller's own password, after re-proving they know the
+    current one — a stolen or left-open session alone can't take over
+    the account.
+
+    A wrong `current_password` is a 401 with its own message. (The
+    frontend treats 401 from most endpoints as "your session expired"
+    and signs you out; this call opts out of that — see api/client.js —
+    since here it means "that password is wrong", not "you're logged
+    out".)
+
+    The response carries no password or hash, only an acknowledgement.
+
+    What this does NOT do: revoke existing tokens. Sessions are stateless
+    JWTs with a 24h expiry and no server-side session list, so a token
+    minted before the change keeps working until it expires. Changing a
+    password therefore protects future logins, not sessions already
+    open elsewhere — see the README's Auth section.
+    """
+    document = await db.users.find_one({"_id": ObjectId(current_user.user_id)})
+    if document is None or not verify_password(payload.current_password, document["password_hash"]):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Current password is incorrect"
+        )
+
+    await db.users.update_one(
+        {"_id": document["_id"]},
+        {"$set": {"password_hash": hash_password(payload.new_password)}},
+    )
+    return MessageOut(message="Password updated")

@@ -16,9 +16,22 @@ import { useEffect, useRef, useState } from 'react'
 // poll after a real success only ever shows the small "Refreshing…"
 // indicator and leaves `data` untouched until the new result arrives.
 //
-// `fetchFn` is called on mount and every interval tick; pass a stable
-// function (e.g. wrapped in useCallback with an empty dep array in the
-// calling component, as every component below does).
+// `fetchFn` is called on mount, on every interval tick, and immediately
+// whenever it CHANGES. Callers wrap it in useCallback keyed on whatever
+// the query depends on (the selected brand, the range toggle), so
+// "the query changed" and "fetchFn's identity changed" are the same
+// event: changing a filter re-fetches at once, shows the loading state
+// (the data on screen belongs to the OLD filter and shouldn't pass as the
+// new one), and restarts the poll clock. Pass a memoized function — an
+// inline arrow would look "changed" on every render and refetch forever.
+//
+// Before this, only `intervalMs` re-ran the effect, so a filter change
+// waited for the next poll tick (up to 5s, measured: 3.2s for the brand
+// switcher, 5.0s for a range toggle). Every panel polls on its own
+// offset timer, so after picking a brand they caught up at different
+// moments — and each showed the previous brand's numbers under the new
+// brand's label until its turn — which read as "the filter only works on
+// some panels".
 export function useApiData(fetchFn, { intervalMs } = {}) {
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -27,24 +40,30 @@ export function useApiData(fetchFn, { intervalMs } = {}) {
   const [pollError, setPollError] = useState(null)
   const [lastUpdated, setLastUpdated] = useState(null)
 
-  // Refs, not state: read inside the effect without needing to be
-  // effect dependencies (that would tear down and rebuild the interval
-  // on every fetch, which is exactly the bug this hook needs to avoid).
-  const fetchFnRef = useRef(fetchFn)
-  fetchFnRef.current = fetchFn
+  // A ref, not state: read inside the effect without being an effect
+  // dependency (that would tear down and rebuild the interval on every
+  // fetch, which is exactly the bug this hook needs to avoid).
   const hasDataRef = useRef(false)
-  const isFetchingRef = useRef(false)
 
   useEffect(() => {
     let cancelled = false
+    // Local to THIS effect run, deliberately not a ref shared across
+    // runs. React's dev-mode StrictMode mounts, cleans up, and re-mounts
+    // every effect: with a shared "fetch in flight" ref, the first run's
+    // fetch (already cancelled by that cleanup, its result discarded)
+    // left the flag set, so the re-run skipped its own fetch and a hook
+    // with no polling interval — BrandSwitcher — never loaded anything
+    // in dev. Polling callers hid it (the next tick fetched). A per-run
+    // flag means each run guards only its own overlapping ticks.
+    let isFetching = false
     hasDataRef.current = false
 
     async function runFetch() {
       // Skip this tick rather than stack a second request on top of one
       // still in flight — matters if a fetch ever takes longer than the
       // poll interval (slow network, backend under load).
-      if (isFetchingRef.current) return
-      isFetchingRef.current = true
+      if (isFetching) return
+      isFetching = true
 
       const hadDataBefore = hasDataRef.current
       if (hadDataBefore) {
@@ -55,7 +74,7 @@ export function useApiData(fetchFn, { intervalMs } = {}) {
       }
 
       try {
-        const result = await fetchFnRef.current()
+        const result = await fetchFn()
         if (cancelled) return
         hasDataRef.current = true
         setData(result)
@@ -75,7 +94,7 @@ export function useApiData(fetchFn, { intervalMs } = {}) {
           setError(err)
         }
       } finally {
-        isFetchingRef.current = false
+        isFetching = false
         // No early return here on purpose (oxlint flags `return` inside
         // `finally` — it can mask control flow from try/catch, even
         // though nothing here does): guard with the condition instead.
@@ -107,8 +126,10 @@ export function useApiData(fetchFn, { intervalMs } = {}) {
       cancelled = true
       if (intervalId !== null) clearInterval(intervalId)
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- fetchFn is read via fetchFnRef; intervalMs is the only real dependency
-  }, [intervalMs])
+    // fetchFn is a dependency: a changed query re-runs this effect, so
+    // cleanup cancels the old fetch and clears the old interval, and the
+    // new run (which closes over the new fetchFn) fetches straight away.
+  }, [intervalMs, fetchFn])
 
   return { data, loading, error, isRefreshing, pollError, lastUpdated }
 }

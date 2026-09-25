@@ -19,7 +19,7 @@ compute_change_pct) covers every product instead.
 
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from ..database import get_database
@@ -51,6 +51,38 @@ DECLINE_SEVERE_THRESHOLD_PCT = -50.0
 DEFAULT_ALERT_RANGE = "7d"
 
 
+# Ascending, so index = tier number.
+SEVERITY_ORDER = ["mild", "moderate", "severe"]
+
+
+def _anomaly_alert_severity(z_severity: str | None, detector_agreement: int) -> str:
+    """Base tier is the z-score's own severity, or "mild" when it has none
+    (an Isolation Forest / forecast-only flag has no z tier to borrow).
+    Each detector agreeing beyond the first raises it one tier, capped at
+    "severe": one method flagging something is a lead, two independent
+    methods agreeing is corroboration, three is about as strong as this
+    system can say. This is what lets a 2-3 detector anomaly rank above
+    a lone flag of the same base severity.
+    """
+    base = SEVERITY_ORDER.index(z_severity or "mild")
+    bumped = min(len(SEVERITY_ORDER) - 1, base + max(0, detector_agreement - 1))
+    return SEVERITY_ORDER[bumped]
+
+
+def _alert_sort_key(alert: Alert) -> tuple[int, int, float]:
+    """Ascending sort key: most severe first, then most detectors in
+    agreement, then newest. Non-anomaly alerts have no detectors; they
+    count as agreement 1 (one signal), so within a severity tier a 2-3
+    detector anomaly ranks above them and above a lone z-score flag,
+    while a lone flag still ties with them and falls back to recency.
+    """
+    return (
+        -SEVERITY_ORDER.index(alert.severity),
+        -(alert.detector_agreement or 1),
+        -alert.timestamp.timestamp(),
+    )
+
+
 def _decline_severity(change_pct: float) -> str:
     if change_pct <= DECLINE_SEVERE_THRESHOLD_PCT:
         return "severe"
@@ -60,7 +92,7 @@ def _decline_severity(change_pct: float) -> str:
 
 
 async def _get_declining_products(
-    db: AsyncIOMotorDatabase, current_user: UserOut, range_: str
+    db: AsyncIOMotorDatabase, current_user: UserOut, range_: str, brand: str | None = None
 ) -> list[dict]:
     """Every product (not capped to a top/bottom half — see module
     docstring) whose current-period revenue fell past
@@ -70,7 +102,7 @@ async def _get_declining_products(
     now = datetime.now(timezone.utc)
     current_start = now - timedelta(days=days)
     previous_start = current_start - timedelta(days=days)
-    brand_filter = brand_match_stage(current_user) or {}
+    brand_filter = brand_match_stage(current_user, brand) or {}
 
     group_stage = {
         "$group": {
@@ -105,15 +137,23 @@ async def _get_declining_products(
 
 @router.get("/alerts", response_model=list[Alert])
 async def get_alerts(
+    brand: str | None = Query(
+        default=None,
+        description="Admin only — narrows every source to one brand, exactly as on the other "
+        "endpoints (see routers/orders.py's get_orders). Ignored for role='business', which is "
+        "always scoped to its own owned_brands.",
+    ),
     current_user: UserOut = Depends(get_current_user),
     db: AsyncIOMotorDatabase = Depends(get_database),
 ) -> list[Alert]:
     """One ranked feed over anomalies + HIGH-risk inventory + declining
     regions/products, sorted severe-first, then most-recent-first
     within a severity tier. Brand-scoped exactly like every other
-    endpoint (each underlying source call already applies
+    endpoint (each underlying source call applies
     security.brand_match_stage — a business account never sees another
-    brand's alerts of any type).
+    brand's alerts of any type). `brand` is passed to all four sources
+    (anomalies, inventory risk, regional declines, product declines) so
+    the admin's brand filter narrows the whole feed, not part of it.
     """
     # Naive-but-UTC, matching every other timestamp in this app (Motor
     # hands BSON dates back naive — see models.py's _format_utc_z) —
@@ -131,30 +171,42 @@ async def get_alerts(
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     alerts: list[Alert] = []
 
-    anomalies = await get_business_anomalies(limit=50, brand=None, current_user=current_user, db=db)
+    anomalies = await get_business_anomalies(limit=50, brand=brand, current_user=current_user, db=db)
     for event in anomalies:
+        detectors = [
+            name
+            for name, flagged in (
+                ("z_score", event.z_score.flagged),
+                ("isolation_forest", bool(event.isolation_forest and event.isolation_forest.flagged)),
+                ("forecast", bool(event.forecast and event.forecast.flagged)),
+            )
+            if flagged
+        ]
+        message = f"Unusual order volume in {event.region} — {event.brand} ({event.product_name})"
+        if event.z_score.flagged and event.z_score.score is not None:
+            message += f", z={event.z_score.score:.2f}"
+        message += f" — flagged by {event.detector_agreement} of 3 detectors"
+
         alerts.append(
             Alert(
                 type="anomaly",
-                severity=event.severity or "mild",
-                message=(
-                    f"Unusual order volume in {event.region} — {event.brand} "
-                    f"({event.product_name}), z={event.z_score:.2f}"
-                    if event.z_score is not None
-                    else f"Unusual order volume in {event.region} — {event.brand}"
-                ),
+                severity=_anomaly_alert_severity(event.z_score.severity, event.detector_agreement),
+                message=message,
                 timestamp=event.timestamp,
                 related_entity={
+                    "anomaly_id": event.id,
                     "order_id": event.order_id,
                     "region": event.region,
                     "brand": event.brand,
                     "product_id": event.product_id,
                 },
+                detectors=detectors,
+                detector_agreement=event.detector_agreement,
             )
         )
 
     risk_items = await get_inventory_risk(
-        minutes=60 * 24, low_stock_threshold=20, format="json", brand=None,
+        minutes=60 * 24, low_stock_threshold=20, format="json", brand=brand,
         current_user=current_user, db=db,
     )
     for item in risk_items:
@@ -178,7 +230,7 @@ async def get_alerts(
         )
 
     declining_regions = await get_region_stats(
-        range=DEFAULT_ALERT_RANGE, brand=None, current_user=current_user, db=db
+        range=DEFAULT_ALERT_RANGE, brand=brand, current_user=current_user, db=db
     )
     for region in declining_regions:
         change_pct = region.change_pct.revenue
@@ -196,7 +248,7 @@ async def get_alerts(
                 )
             )
 
-    declining_products = await _get_declining_products(db, current_user, DEFAULT_ALERT_RANGE)
+    declining_products = await _get_declining_products(db, current_user, DEFAULT_ALERT_RANGE, brand)
     for product in declining_products:
         change_pct = product["change_pct"]
         alerts.append(
@@ -212,6 +264,5 @@ async def get_alerts(
             )
         )
 
-    severity_rank = {"severe": 0, "moderate": 1, "mild": 2}
-    alerts.sort(key=lambda a: (severity_rank[a.severity], -a.timestamp.timestamp()))
+    alerts.sort(key=_alert_sort_key)
     return alerts

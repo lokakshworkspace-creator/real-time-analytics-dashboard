@@ -35,6 +35,19 @@ export function setUnauthorizedHandler(handler) {
 }
 
 async function getJson(path, { params } = {}) {
+  return requestJson('GET', path, { params })
+}
+
+// A POST for endpoints with no request body (e.g. /anomalies/{id}/explain
+// — the id in the path is the whole input).
+async function postJson(path) {
+  return requestJson('POST', path)
+}
+
+// `handleUnauthorized: false` opts one call out of the automatic
+// "401 => the session is over, log out" behavior below, for the rare
+// endpoint where a 401 means something else (see changePassword).
+async function requestJson(method, path, { params, body, handleUnauthorized = true } = {}) {
   const query = params
     ? '?' +
       Object.entries(params)
@@ -44,10 +57,15 @@ async function getJson(path, { params } = {}) {
     : ''
 
   const headers = currentToken ? { Authorization: `Bearer ${currentToken}` } : {}
+  if (body !== undefined) headers['Content-Type'] = 'application/json'
 
   let response
   try {
-    response = await fetch(`${API_BASE_URL}${API_PREFIX}${path}${query}`, { headers })
+    response = await fetch(`${API_BASE_URL}${API_PREFIX}${path}${query}`, {
+      method,
+      headers,
+      body: body === undefined ? undefined : JSON.stringify(body),
+    })
   } catch {
     // fetch() itself throws on network failure (backend down, CORS
     // blocked, DNS, etc.) — normalize it into the same Error type a
@@ -56,20 +74,35 @@ async function getJson(path, { params } = {}) {
     throw new Error(`Could not reach the API at ${API_BASE_URL}. Is the backend running?`)
   }
 
-  if (response.status === 401 && unauthorizedHandler) {
+  if (response.status === 401 && unauthorizedHandler && handleUnauthorized) {
     unauthorizedHandler()
   }
 
   if (!response.ok) {
     let detail = ''
     try {
-      const body = await response.json()
-      detail = body.detail ? `: ${body.detail}` : ''
+      const errorBody = await response.json()
+      // FastAPI sends either a plain string (our own HTTPExceptions) or
+      // a list of {msg, loc, ...} objects (request validation, 422) —
+      // flatten the list to its messages so those are readable too.
+      if (typeof errorBody.detail === 'string') {
+        detail = errorBody.detail
+      } else if (Array.isArray(errorBody.detail)) {
+        detail = errorBody.detail.map((e) => e.msg).join('; ')
+      }
     } catch {
       // Response wasn't JSON (e.g. a proxy error page) — fall back to
       // just the status line, still better than swallowing the error.
     }
-    throw new Error(`${path} failed (${response.status} ${response.statusText})${detail}`)
+    const error = new Error(
+      `${path} failed (${response.status} ${response.statusText})${detail ? `: ${detail}` : ''}`
+    )
+    // The server's own message, on its own, for UI that wants to show a
+    // person something readable (e.g. the explain button's "try again
+    // shortly") instead of the developer-oriented line above.
+    error.detail = detail
+    error.status = response.status
+    throw error
   }
 
   return response.json()
@@ -98,6 +131,33 @@ export async function login(email, password) {
 
 export function getMe() {
   return getJson('/auth/me')
+}
+
+// Self-service profile edit — today only a business account's display
+// name (the backend rejects anything else; see routers/auth.py).
+export function updateProfile({ businessName }) {
+  return requestJson('PATCH', '/auth/me', { body: { business_name: businessName } })
+}
+
+// A wrong current password comes back as 401, which every other
+// endpoint uses to mean "your session expired". Here that would sign
+// the user out for a typo, so this call opts out of the automatic
+// logout — and hands it back only if the 401 is a genuinely bad/expired
+// token rather than the wrong-password reply.
+export const WRONG_CURRENT_PASSWORD_DETAIL = 'Current password is incorrect'
+
+export async function changePassword({ currentPassword, newPassword }) {
+  try {
+    return await requestJson('POST', '/auth/change-password', {
+      body: { current_password: currentPassword, new_password: newPassword },
+      handleUnauthorized: false,
+    })
+  } catch (error) {
+    if (error.status === 401 && error.detail !== WRONG_CURRENT_PASSWORD_DETAIL && unauthorizedHandler) {
+      unauthorizedHandler()
+    }
+    throw error
+  }
 }
 
 // --- Orders / KPIs / trend ---------------------------------------------
@@ -142,6 +202,13 @@ export function getBusinessAnomalies({ limit = 50, brand } = {}) {
   return getJson('/anomalies/business', { params: { limit, brand } })
 }
 
+// On-demand LLM explanation of one flagged anomaly. POST because the
+// first call spends quota and stores the result; repeat calls return the
+// stored one (response.cached === true) at no cost.
+export function explainAnomaly(anomalyId) {
+  return postJson(`/anomalies/${encodeURIComponent(anomalyId)}/explain`)
+}
+
 export function getBrands() {
   return getJson('/brands')
 }
@@ -154,8 +221,8 @@ export function getBrandsBenchmark({ range = '30d' } = {}) {
 }
 
 // Feature 4: consolidated anomaly + low-stock + decline feed.
-export function getAlerts() {
-  return getJson('/alerts')
+export function getAlerts({ brand } = {}) {
+  return getJson('/alerts', { params: { brand } })
 }
 
 // --- CSV export --------------------------------------------------------

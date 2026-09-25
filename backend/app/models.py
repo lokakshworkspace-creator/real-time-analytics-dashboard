@@ -10,9 +10,17 @@ independently.
 """
 
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, EmailStr, Field, field_serializer, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    EmailStr,
+    Field,
+    StringConstraints,
+    field_serializer,
+    model_validator,
+)
 
 
 def _format_utc_z(dt: datetime) -> str:
@@ -126,15 +134,66 @@ def order_document_to_out(document: dict) -> OrderOut:
     )
 
 
+class ZScoreVerdict(BaseModel):
+    """The z-score detector's verdict on an order (detectors/zscore.py),
+    scored at ingest. Always present — every order has one. `score` is
+    None when no verdict was possible (cold start, or a constant window).
+    """
+
+    flagged: bool
+    score: float | None = None
+    severity: AnomalySeverity | None = Field(
+        default=None,
+        description="Tier derived from |score| — see detectors/zscore.py. None unless flagged.",
+    )
+
+
+class IsolationForestVerdictOut(BaseModel):
+    """The Isolation Forest's verdict on the order's (region, brand, hour)
+    bucket (detectors/isolation_forest.py). `score` is 0..1, higher =
+    more anomalous.
+    """
+
+    flagged: bool
+    score: float
+
+
+class ForecastVerdictOut(BaseModel):
+    """The forecast-deviation verdict on the order's (region, brand,
+    hour) bucket (detectors/forecast_deviation.py): what the fitted
+    trend expected vs. the actual order count that hour.
+    """
+
+    flagged: bool
+    expected: float
+    actual: float
+
+
+def compute_detector_agreement(
+    z_flagged: bool, isolation_forest_flagged: bool | None, forecast_flagged: bool | None
+) -> int:
+    """How many of the three detectors flagged this record, 0-3. A
+    detector that hasn't scored it (None — predates the batch job, or
+    too little history) counts as not having flagged it: absence of a
+    verdict is not agreement.
+    """
+    return int(bool(z_flagged)) + int(bool(isolation_forest_flagged)) + int(bool(forecast_flagged))
+
+
 class BusinessAnomalyEvent(BaseModel):
-    """One entry in GET /api/anomalies/business.
+    """One entry in GET /api/anomalies/business — one order record with
+    all three detectors' verdicts side by side.
 
     Its own model rather than a reuse of OrderOut, mirroring the earlier
     metrics API's AnomalyEvent/MetricOut split: distinct endpoint,
-    distinct contract. `z_score` is the number the region-hour
-    order-volume detector actually computed for the hour this order fell
-    into (see detectors/zscore.py) — the point of an anomaly panel is
-    "flagged, and here's by how much", not just "flagged".
+    distinct contract. A record appears here if ANY detector flagged it,
+    so `z_score.flagged` can be false on a row an Isolation Forest or
+    forecast flag brought in. `isolation_forest` / `forecast` are null
+    for records no batch run has scored (see detectors/batch.py), which
+    is different from a verdict of flagged=false. `detector_agreement`
+    is how many detectors flagged it (0-3) — several independent
+    methods agreeing is stronger evidence than one, and is what
+    GET /api/alerts uses to rank.
     """
 
     id: str
@@ -146,15 +205,10 @@ class BusinessAnomalyEvent(BaseModel):
     region: str
     quantity: int
     total_value: float
-    anomaly: bool
-    z_score: float | None = Field(
-        default=None,
-        description="The region-hour order-volume z-score that triggered this flag.",
-    )
-    severity: AnomalySeverity | None = Field(
-        default=None,
-        description="Tier derived from |z_score| — see detectors/zscore.py. None if z_score is None.",
-    )
+    z_score: ZScoreVerdict
+    isolation_forest: IsolationForestVerdictOut | None = None
+    forecast: ForecastVerdictOut | None = None
+    detector_agreement: int = Field(ge=0, le=3)
 
     @field_serializer("timestamp")
     def serialize_timestamp(self, dt: datetime) -> str:
@@ -162,6 +216,20 @@ class BusinessAnomalyEvent(BaseModel):
 
 
 def order_document_to_anomaly(document: dict) -> BusinessAnomalyEvent:
+    z_flagged = document.get("anomaly", False)
+    isolation_forest = None
+    if document.get("is_anomaly_if") is not None:
+        isolation_forest = IsolationForestVerdictOut(
+            flagged=document["is_anomaly_if"], score=document["if_score"]
+        )
+    forecast = None
+    if document.get("is_anomaly_forecast") is not None:
+        forecast = ForecastVerdictOut(
+            flagged=document["is_anomaly_forecast"],
+            expected=document["forecast_expected"],
+            actual=document["forecast_actual"],
+        )
+
     return BusinessAnomalyEvent(
         id=str(document["_id"]),
         order_id=document["order_id"],
@@ -172,9 +240,16 @@ def order_document_to_anomaly(document: dict) -> BusinessAnomalyEvent:
         region=document["region"],
         quantity=document["quantity"],
         total_value=document["total_value"],
-        anomaly=document.get("anomaly", False),
-        z_score=document.get("z_score"),
-        severity=document.get("severity"),
+        z_score=ZScoreVerdict(
+            flagged=z_flagged, score=document.get("z_score"), severity=document.get("severity")
+        ),
+        isolation_forest=isolation_forest,
+        forecast=forecast,
+        detector_agreement=compute_detector_agreement(
+            z_flagged,
+            isolation_forest.flagged if isolation_forest else None,
+            forecast.flagged if forecast else None,
+        ),
     )
 
 
@@ -484,6 +559,44 @@ class InventoryRiskItem(BaseModel):
     reorder_suggestion: ReorderSuggestion | None = None
 
 
+class ExplanationResponse(BaseModel):
+    """Response body for POST /api/anomalies/{id}/explain. `cached` is
+    true when this came straight from the anomaly record (no model call
+    was made), false when it was generated by this request. The same
+    text is stored either way, so a second call is always free.
+    """
+
+    anomaly_id: str
+    explanation: str
+    suggested_action: str
+    explained_at: datetime
+    cached: bool
+
+    @field_serializer("explained_at")
+    def serialize_explained_at(self, dt: datetime) -> str:
+        return _format_utc_z(dt)
+
+
+class BatchRunSummary(BaseModel):
+    """Response body for POST /api/detectors/run-batch — what one batch
+    pass over the trailing window actually did (see detectors/batch.py).
+    `*_buckets_scored` counts buckets that got a verdict (flagged or
+    not); a detector with too little history for a bucket scores fewer
+    than the window holds, so scored < buckets_in_window is normal, not
+    an error.
+    """
+
+    window_days: int
+    recent_hours: int
+    buckets_in_window: int
+    isolation_forest_buckets_scored: int
+    isolation_forest_buckets_flagged: int
+    forecast_buckets_scored: int
+    forecast_buckets_flagged: int
+    orders_stamped: int
+    note: str | None = None
+
+
 AlertType = Literal["anomaly", "low_stock", "decline"]
 
 
@@ -507,6 +620,12 @@ class Alert(BaseModel):
     message: str
     timestamp: datetime
     related_entity: dict[str, str | None]
+    # Only set on type="anomaly": which of "z_score" / "isolation_forest"
+    # / "forecast" flagged it (drives the frontend's detector badges),
+    # and how many — the same count as BusinessAnomalyEvent.detector_agreement.
+    # Null on the other alert types, which have no notion of detectors.
+    detectors: list[str] | None = None
+    detector_agreement: int | None = None
 
     @field_serializer("timestamp")
     def serialize_timestamp(self, dt: datetime) -> str:
@@ -516,6 +635,13 @@ class Alert(BaseModel):
 # --- Users / auth --------------------------------------------------------
 
 UserRole = Literal["admin", "business"]
+
+# One definition of "a valid new password", shared by registration and
+# password change so the two can never drift apart. 72 is bcrypt's own
+# hard input limit (see security.py) — rejected with a clear 422 rather
+# than silently truncated.
+PASSWORD_MIN_LENGTH = 8
+PASSWORD_MAX_LENGTH = 72
 
 
 class UserIn(BaseModel):
@@ -531,8 +657,8 @@ class UserIn(BaseModel):
     email: EmailStr
     password: str = Field(
         ...,
-        min_length=8,
-        max_length=72,
+        min_length=PASSWORD_MIN_LENGTH,
+        max_length=PASSWORD_MAX_LENGTH,
         description="Hashed before storage, never stored raw. 72 bytes is bcrypt's own hard "
         "limit — rejected here with a clear 422 rather than silently truncated.",
     )
@@ -583,6 +709,55 @@ class LoginIn(BaseModel):
 
     email: EmailStr
     password: str = Field(..., min_length=1)
+
+
+class ProfileUpdateIn(BaseModel):
+    """Request body for PATCH /api/auth/me — the ONE thing a user may
+    change about their own account: a business account's display name.
+
+    `extra="forbid"` is the guard that matters: role, owned_brands,
+    email and everything else are authorization- or identity-defining
+    fields that only an admin sets at registration, so a body naming
+    any of them is rejected outright (a 422 naming the field) rather
+    than silently ignored — an ignored field would read to a client as
+    "saved", and would leave a real privilege-escalation attempt (say,
+    adding a brand to owned_brands) looking like it half-worked.
+    Whitespace is stripped and a blank name is rejected.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    business_name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)]
+
+
+class PasswordChangeIn(BaseModel):
+    """Request body for POST /api/auth/change-password.
+
+    `new_password` follows exactly the registration rules (see
+    PASSWORD_MIN_LENGTH / PASSWORD_MAX_LENGTH). `current_password` is
+    only checked for length so an over-long value gets a 422 instead of
+    reaching bcrypt (which rejects >72 bytes with an error, not a
+    verdict). A new password identical to the current one is rejected: a
+    "change" that changes nothing is almost always a slip, and telling
+    the user beats reporting a success that wasn't one.
+    """
+
+    current_password: str = Field(..., min_length=1, max_length=PASSWORD_MAX_LENGTH)
+    new_password: str = Field(..., min_length=PASSWORD_MIN_LENGTH, max_length=PASSWORD_MAX_LENGTH)
+
+    @model_validator(mode="after")
+    def _new_differs_from_current(self) -> "PasswordChangeIn":
+        if self.new_password == self.current_password:
+            raise ValueError("new_password must be different from current_password")
+        return self
+
+
+class MessageOut(BaseModel):
+    """A plain acknowledgement body — used where success has nothing to
+    return and, specifically, must not echo anything sensitive back.
+    """
+
+    message: str
 
 
 class TokenOut(BaseModel):

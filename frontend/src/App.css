@@ -4,33 +4,6 @@
   padding: 24px 20px 48px;
 }
 
-.dashboard__header h1 {
-  margin: 0 0 4px;
-  font-size: 1.5rem;
-}
-
-.dashboard__subtitle {
-  margin: 0;
-  color: var(--text-muted);
-  font-size: 0.9rem;
-}
-
-.dashboard__header-row {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-  flex-wrap: wrap;
-  margin-bottom: 24px;
-}
-
-.dashboard__header-controls {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-shrink: 0;
-}
-
 .viewing-badge {
   font-size: 0.82rem;
   font-weight: 600;
@@ -545,6 +518,122 @@
   padding: 2px 7px;
 }
 
+/* --- Detector badges (which of the 3 detectors flagged an anomaly) ---
+   Deliberately a different shape from .severity-badge (which says HOW
+   BAD): these say WHO agreed, so they're outlined pills in the accent
+   colour rather than filled danger/warning ones. */
+
+.detector-badges {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.detector-badge {
+  font-size: 0.66rem;
+  font-weight: 600;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  padding: 1px 7px;
+}
+
+.detector-badges__count {
+  margin-left: 2px;
+  font-size: 0.68rem;
+  color: var(--text-muted);
+}
+
+/* --- Explain button + inline explanation --- */
+
+.explain {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.explain__button {
+  font: inherit;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--accent);
+  background: transparent;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  padding: 3px 10px;
+  cursor: pointer;
+}
+
+.explain__button:hover:not(:disabled) {
+  background: var(--accent);
+  color: white;
+}
+
+.explain__button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.explain__error {
+  font-size: 0.72rem;
+  color: var(--danger);
+}
+
+.explanation {
+  margin-top: 8px;
+  padding: 8px 10px;
+  font-size: 0.8rem;
+  line-height: 1.45;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.explanation__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+
+.explanation__label {
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+/* Freshly generated = filled accent (a model call was just spent);
+   saved = muted outline (identical text served from the record). */
+.explanation__tag {
+  font-size: 0.64rem;
+  font-weight: 700;
+  border-radius: 999px;
+  padding: 1px 7px;
+}
+
+.explanation__tag--fresh {
+  background: var(--accent);
+  color: white;
+}
+
+.explanation__tag--cached {
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+}
+
+.explanation__text,
+.explanation__action {
+  margin: 0 0 4px;
+}
+
+.explanation__action {
+  color: var(--text-muted);
+}
+
 /* --- Login page --- */
 
 .login-page {
@@ -623,4 +712,214 @@
   font-size: 0.72rem;
   color: var(--text-muted);
   line-height: 1.4;
+}
+
+/* --- Multi-page shell: navbar, page titles, footnote --- */
+
+.navbar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.navbar__inner {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 10px 20px;
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  flex-wrap: wrap;
+}
+
+.navbar__brand {
+  font-weight: 700;
+  font-size: 0.95rem;
+  white-space: nowrap;
+}
+
+.navbar__links {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  flex: 1;
+}
+
+.navbar__link {
+  padding: 6px 12px;
+  border-radius: 8px;
+  font-size: 0.86rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-decoration: none;
+}
+
+.navbar__link:hover {
+  color: var(--text);
+  background: var(--bg);
+}
+
+.navbar__link--active {
+  color: var(--accent);
+  background: var(--bg);
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+.navbar__controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+}
+
+.page-title {
+  margin: 0 0 18px;
+  font-size: 1.4rem;
+}
+
+.dashboard__lower--even {
+  grid-template-columns: 1fr 1fr;
+}
+
+@media (max-width: 860px) {
+  .dashboard__lower--even {
+    grid-template-columns: 1fr;
+  }
+}
+
+.dashboard__footnote {
+  margin: 28px 0 0;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.not-available {
+  max-width: 520px;
+}
+
+.status-state--success {
+  color: var(--success);
+  background: var(--success-bg);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 0.85rem;
+}
+
+/* --- Profile page --- */
+
+.profile-section {
+  max-width: 640px;
+  margin-bottom: 20px;
+}
+
+.profile-details {
+  display: grid;
+  grid-template-columns: 140px 1fr;
+  gap: 8px 16px;
+  margin: 0 0 12px;
+  font-size: 0.9rem;
+}
+
+.profile-details dt {
+  color: var(--text-muted);
+}
+
+.profile-details dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.brand-chip {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 2px 10px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+}
+
+.not-available a {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* --- Forms (profile page) --- */
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.form-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+}
+
+.form-field input {
+  font: inherit;
+  font-size: 0.95rem;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 9px 10px;
+}
+
+.form-field input:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.form-hint {
+  margin: -4px 0 0;
+  font-size: 0.76rem;
+  color: var(--text-muted);
+}
+
+.form-hint--error {
+  color: var(--danger);
+}
+
+.form-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.form-submit {
+  font: inherit;
+  font-weight: 600;
+  color: white;
+  background: var(--accent);
+  border: none;
+  border-radius: 8px;
+  padding: 9px 16px;
+  cursor: pointer;
+}
+
+.form-submit:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.form-message {
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.form-message--success {
+  color: var(--success);
+}
+
+.form-message--error {
+  color: var(--danger);
 }

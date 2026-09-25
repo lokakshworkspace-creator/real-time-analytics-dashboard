@@ -41,6 +41,21 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     jwt_expiry_hours: int = 24
 
+    # On-demand anomaly explanations (POST /api/anomalies/{id}/explain,
+    # see llm.py). Empty by default: the rest of the app needs no key,
+    # and an unset key makes only that one endpoint answer 503 (already-
+    # cached explanations still work). The model is a setting, not a
+    # constant, because hosted model names get retired — swapping one
+    # should be a .env edit, not a code change. That is not hypothetical:
+    # the brief named gemini-2.0-flash-lite, and by the time this was
+    # first run against the live API Google had retired it (a 404 "no
+    # longer available"), along with the 2.5 flash models for new users.
+    # gemini-3.5-flash-lite is the lite-tier replacement the API itself
+    # pointed to, pinned by name (not a "-latest" alias) so a captured
+    # example stays reproducible.
+    gemini_api_key: str = ""
+    gemini_model: str = "gemini-3.5-flash-lite"
+
     model_config = SettingsConfigDict(
         env_file=str(ENV_PATH),
         env_file_encoding="utf-8",
